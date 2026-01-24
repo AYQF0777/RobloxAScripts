@@ -1,0 +1,448 @@
+local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
+local SaveManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/SaveManager.lua"))()
+local InterfaceManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/InterfaceManager.lua"))()
+
+-- Services
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local HttpService = game:GetService("HttpService")
+
+-- Game Objects
+local ServerInfo = ReplicatedStorage:WaitForChild("Server Information")
+local WaveValue = ServerInfo:WaitForChild("Wave")
+local UpboardRemote = ReplicatedStorage.Remotes.Upboard
+local ChampionRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("Champion")
+local XmasRemote = ReplicatedStorage.Remotes:FindFirstChild("GameModes") and ReplicatedStorage.Remotes.GameModes:FindFirstChild("XMasDifficulties")
+local NotifyRemote = ReplicatedStorage.Remotes:WaitForChild("Notify")
+local LobbyRelatives = ReplicatedStorage:FindFirstChild("Lobby Relatives")
+local DoorsRemote = LobbyRelatives and LobbyRelatives:FindFirstChild("Doors")
+local ChristmasMapRemote = LobbyRelatives and LobbyRelatives:FindFirstChild("ChristmasMap")
+
+local player = Players.LocalPlayer
+local pGui = player:WaitForChild("PlayerGui")
+
+-- State
+local aggressiveSpam = false
+local currentWaveNum = 0
+local giftCount, candyCount = 0, 0
+local isCollectingItems = false 
+local centerPoint = nil
+local angle = 0
+local challengeRunning = false
+local challengeAttempts = 0
+local isInChristmasEvent = false
+local candyCapacityReached = false
+
+-- UI Window
+local Window = Fluent:CreateWindow({
+    Title = "Aden Hub (AAC)",
+    SubTitle = "v137 - Clean",
+    TabWidth = 140,
+    Size = UDim2.fromOffset(580, 460),
+    Acrylic = false,
+    Theme = "Dark"
+})
+
+local Tabs = {
+    Main = Window:AddTab({ Title = "Main", Icon = "play" }),
+    Ability = Window:AddTab({ Title = "Auto Ability", Icon = "zap" }), 
+    AutoJoin = Window:AddTab({ Title = "Auto Join", Icon = "door-open" }),
+    Dodge = Window:AddTab({ Title = "Dodge", Icon = "move" }),
+    Webhook = Window:AddTab({ Title = "Webhook", Icon = "send" }),
+    Settings = Window:AddTab({ Title = "Settings", Icon = "settings" })
+}
+
+-- Main Tab
+Tabs.Main:AddSection("Statistics")
+local dataPara = Tabs.Main:AddParagraph({Title = "Items Collected", Content = "Gifts: 0 | Candy: 0"})
+
+Tabs.Main:AddSection("Automation")
+Tabs.Main:AddToggle("AutoCollect", {Title = "Auto Collect", Default = false})
+Tabs.Main:AddToggle("AutoRetry", {Title = "Auto Retry Match", Default = false})
+Tabs.Main:AddToggle("AutoSkip", {Title = "Auto Skip Waves", Default = false})
+Tabs.Main:AddDropdown("AutoDifficulty", {Title = "Difficulty", Values = {"None", "Easy", "Normal", "Hard", "Extreme"}, Default = "None"})
+
+-- Ability Tab
+Tabs.Ability:AddSection("Awakening")
+Tabs.Ability:AddToggle("AutoAwaken", {Title = "Auto Awaken", Default = false})
+Tabs.Ability:AddInput("StartWaveInput", {Title = "Start Wave", Default = "20", Numeric = true})
+local statusPara = Tabs.Ability:AddParagraph({Title = "Status", Content = "Wave: 0 | Ready: NO"})
+
+-- Auto Join Tab
+Tabs.AutoJoin:AddSection("Challenge Automation")
+local JoinChallenge = Tabs.AutoJoin:AddToggle("AutoJoinChallenge", {Title = "Auto Join Challenge", Default = false})
+Tabs.AutoJoin:AddDropdown("SelectItem", {
+    Title = "Select Target Item", 
+    Values = {"C_A_A_Power Fragment", "C_C_C_Devil Soul", "C_A_A_Deluxe Dice", "C_A_A_Dice"}, 
+    Default = "C_A_A_Power Fragment"
+})
+local challengeStatus = Tabs.AutoJoin:AddParagraph({Title = "Challenge Status", Content = "Awaiting Setup..."})
+
+Tabs.AutoJoin:AddSection("Join Christmas Event")
+Tabs.AutoJoin:AddToggle("JoinChristmasEvent", {Title = "Join Christmas Event", Default = false})
+Tabs.AutoJoin:AddToggle("JoinEventNoItem", {Title = "Join Event if No Item Found", Default = false})
+local eventStatus = Tabs.AutoJoin:AddParagraph({Title = "Event Status", Content = "Waiting..."})
+
+-- Dodge Tab
+Tabs.Dodge:AddSection("Spin Dodge")
+Tabs.Dodge:AddToggle("EnableSpin", {Title = "Spin Dodge", Default = false})
+Tabs.Dodge:AddInput("SpinRadius", {Title = "Radius", Default = "10", Numeric = true})
+Tabs.Dodge:AddInput("SpinSpeed", {Title = "Speed", Default = "5", Numeric = true})
+
+-- Webhook Tab - ONLY THESE 4 ELEMENTS
+Tabs.Webhook:AddSection("Discord Webhook")
+Tabs.Webhook:AddInput("WebhookURL", {Title = "Enter Webhook", Default = ""})
+Tabs.Webhook:AddToggle("EnableWebhook", {Title = "Enable Webhook", Default = false})
+local webhookStatus = Tabs.Webhook:AddParagraph({Title = "Status", Content = "Webhook not configured"})
+
+--- LOGIC ---
+
+local function sendWebhook(url, data)
+    local success, response = pcall(function()
+        local http_func = syn and syn.request or http and http.request or http_request or request
+        if not http_func then return nil end
+        return http_func({
+            Url = url,
+            Method = "POST",
+            Headers = {["Content-Type"] = "application/json"},
+            Body = HttpService:JSONEncode(data)
+        })
+    end)
+    return success and response and (not response.StatusCode or (response.StatusCode >= 200 and response.StatusCode < 300))
+end
+
+local function formatRewards(scrollingFrame)
+    local rewards = {}
+    for _, child in pairs(scrollingFrame:GetChildren()) do
+        if child:IsA("GuiObject") and not child:IsA("UIListLayout") and not child:IsA("UIPadding") and not child:IsA("UIGridLayout") then
+            if child.Name:match("^B_") then
+                local cleanName = child.Name:gsub("^B_[A-Z]_[A-Z]_", ""):gsub("_", " ")
+                if cleanName ~= "" then table.insert(rewards, "• " .. cleanName) end
+            end
+        end
+    end
+    return #rewards > 0 and table.concat(rewards, "\n") or "No rewards"
+end
+
+local function testWebhook()
+    local url = Fluent.Options.WebhookURL.Value
+    if not url or url == "" then webhookStatus:SetDesc("❌ Enter webhook URL"); return end
+    if not url:match("^https://discord") then webhookStatus:SetDesc("❌ Invalid URL"); return end
+    
+    webhookStatus:SetDesc("⏳ Sending...")
+    local success = sendWebhook(url, {
+        username = "Aden Hub",
+        embeds = {{
+            title = "✅ Webhook Test",
+            description = "Working correctly!",
+            color = 65280,
+            timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ")
+        }}
+    })
+    task.wait(0.5)
+    webhookStatus:SetDesc(success and "✅ Test sent!" or "❌ Failed")
+end
+
+Tabs.Webhook:AddButton({Title = "Test Webhook", Description = "Send test message", Callback = testWebhook})
+
+task.spawn(function()
+    while true do
+        if Fluent.Options.EnableWebhook.Value then
+            local Result = pGui:FindFirstChild("Upboard") and pGui.Upboard:FindFirstChild("Result")
+            if Result and Result.Visible then
+                task.wait(2.5)
+                local Main = Result:FindFirstChild("Main")
+                if Main then
+                    local mapName = Main.MapLabel and Main.MapLabel.Text or "Unknown"
+                    local status, color = "Unknown", 8421504
+                    if Result.HeaderVictory and Result.HeaderVictory.Visible then status, color = "✅ Victory", 65280
+                    elseif Result.HeaderDefeated and Result.HeaderDefeated.Visible then status, color = "❌ Defeated", 16711680 end
+                    local time = Main.Statistics and Main.Statistics.Time and Main.Statistics.Time.CategoryStat and Main.Statistics.Time.CategoryStat.Text or "N/A"
+                    local rewards = Main.Rewards and Main.Rewards.ScrollingFrame and formatRewards(Main.Rewards.ScrollingFrame) or "No rewards"
+                    
+                    local success = sendWebhook(Fluent.Options.WebhookURL.Value, {
+                        username = "Aden Hub",
+                        embeds = {{
+                            title = "🎮 Match Result",
+                            color = color,
+                            fields = {
+                                {name = "🗺️ Map", value = mapName, inline = true},
+                                {name = "📊 Status", value = status, inline = true},
+                                {name = "⏱️ Time", value = time, inline = true},
+                                {name = "🎁 Rewards", value = rewards, inline = false}
+                            },
+                            timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ")
+                        }}
+                    })
+                    webhookStatus:SetDesc(success and "✅ Sent: " .. os.date("%H:%M:%S") or "❌ Failed")
+                end
+                repeat task.wait(1); Result = pGui.Upboard and pGui.Upboard.Result until not Result or not Result.Visible
+            end
+        end
+        task.wait(1)
+    end
+end)
+
+-- Wave tracking
+WaveValue.Changed:Connect(function(val)
+    local num = tonumber(val)
+    if num then
+        currentWaveNum = num
+        aggressiveSpam = Fluent.Options.AutoAwaken.Value and currentWaveNum >= (tonumber(Fluent.Options.StartWaveInput.Value) or 20)
+    end
+end)
+
+-- Auto Awaken
+task.spawn(function()
+    while task.wait(0.1) do
+        if aggressiveSpam and Fluent.Options.AutoAwaken.Value then
+            local lives = workspace:FindFirstChild("Lives")
+            if lives then
+                for _, unit in ipairs(lives:GetChildren()) do
+                    if not Fluent.Options.AutoAwaken.Value then break end
+                    pcall(function() ChampionRemote:FireServer("Awaken", unit) end)
+                end
+            end
+        end
+    end
+end)
+
+-- Auto Retry
+task.spawn(function()
+    while task.wait(0.5) do
+        local Result = pGui:FindFirstChild("Upboard") and pGui.Upboard:FindFirstChild("Result")
+        if Result and Fluent.Options.AutoRetry.Value then
+            if isInChristmasEvent and Fluent.Options.JoinChristmasEvent.Value and Fluent.Options.JoinEventNoItem.Value then
+                local sec = os.time() % 60
+                if sec <= 4 then
+                    eventStatus:SetDesc("Auto-leaving (xx:00-xx:04)")
+                    while Fluent.Options.AutoRetry.Value and os.time() % 60 <= 4 do
+                        if not (pGui.Upboard and pGui.Upboard.Result) then break end
+                        pcall(function() UpboardRemote:FireServer("Leave") end)
+                        task.wait(1)
+                    end
+                    isInChristmasEvent = false
+                    continue
+                end
+            end
+            task.wait(0.5)
+            local Main = Result:FindFirstChild("Main")
+            local Options = Main and Main:FindFirstChild("Options")
+            local PlayAgain = Options and Options:FindFirstChild("PlayAgainButtonHolder")
+            local Leave = Options and Options:FindFirstChild("LeaveButtonHolder")
+            if PlayAgain then
+                while Fluent.Options.AutoRetry.Value and pGui.Upboard and pGui.Upboard.Result do
+                    pcall(function() UpboardRemote:FireServer("PlayAgain") end)
+                    task.wait(1)
+                end
+            elseif Leave then
+                while Fluent.Options.AutoRetry.Value and pGui.Upboard and pGui.Upboard.Result do
+                    pcall(function() UpboardRemote:FireServer("Leave") end)
+                    task.wait(1)
+                end
+            end
+        end
+    end
+end)
+
+-- Auto Skip
+task.spawn(function()
+    while task.wait(4) do
+        if Fluent.Options.AutoSkip.Value then
+            local Upboard = pGui:FindFirstChild("Upboard")
+            if Upboard and Upboard.Wave and Upboard.Wave:FindFirstChild("SkipWaveButtonHolder") then
+                pcall(function() UpboardRemote:FireServer("Vote") end)
+            end
+        end
+    end
+end)
+
+-- Auto Difficulty
+task.spawn(function()
+    while task.wait(0.5) do
+        if Fluent.Options.AutoDifficulty.Value ~= "None" then
+            local PickCard = pGui:FindFirstChild("PickCard")
+            if PickCard and PickCard:FindFirstChild("ChristmasCard") and XmasRemote then
+                pcall(function() XmasRemote:FireServer("Pick", Fluent.Options.AutoDifficulty.Value) end)
+                task.wait(1)
+            end
+        end
+    end
+end)
+
+-- Candy capacity
+NotifyRemote.OnClientEvent:Connect(function(msgType, msgContent)
+    if msgType == "Error" and msgContent and msgContent:find("Daily Capacity") then
+        candyCapacityReached = true
+        dataPara:SetDesc("⚠️ CANDY LIMIT REACHED!")
+    end
+end)
+
+-- Auto Collect
+task.spawn(function()
+    while task.wait(1) do
+        if Fluent.Options.AutoCollect.Value and not isCollectingItems and not candyCapacityReached then
+            local char, hrp = player.Character, player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                local items = {}
+                for _, container in pairs(Workspace:GetChildren()) do
+                    if container.Name:lower() == "candy" or container.Name:lower() == "gift" then
+                        for _, item in pairs(container:GetChildren()) do
+                            table.insert(items, {Obj = item, Type = container.Name:lower()})
+                        end
+                    end
+                end
+                if #items > 0 then
+                    isCollectingItems = true
+                    local orig = char:GetPivot()
+                    for _, data in ipairs(items) do
+                        if not Fluent.Options.AutoCollect.Value or candyCapacityReached then char:PivotTo(orig); break end
+                        if data.Obj and data.Obj.Parent then
+                            char:PivotTo(data.Obj:GetPivot())
+                            if data.Type == "candy" then candyCount = candyCount + 1 else giftCount = giftCount + 1 end
+                            task.wait(0.5)
+                        end
+                    end
+                    if Fluent.Options.AutoCollect.Value and not candyCapacityReached then char:PivotTo(orig) end
+                    isCollectingItems = false
+                end
+            end
+        end
+    end
+end)
+
+-- Spin Dodge
+RunService.Heartbeat:Connect(function(dt)
+    if Fluent.Options.EnableSpin.Value and not isCollectingItems then
+        local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            if not centerPoint then centerPoint = hrp.Position end
+            angle = angle + ((tonumber(Fluent.Options.SpinSpeed.Value) or 5) * dt * -1)
+            local r = tonumber(Fluent.Options.SpinRadius.Value) or 10
+            hrp.CFrame = CFrame.new(centerPoint.X + math.cos(angle) * r, centerPoint.Y + 1, centerPoint.Z + math.sin(angle) * r) * CFrame.Angles(0, angle, 0)
+        end
+    else centerPoint = nil end
+end)
+
+-- Auto Join Challenge
+local ROOMS = {"Hourly_01_01", "Hourly_01_02", "Hourly_02_01", "Hourly_02_02", "Hourly_03_01", "Hourly_03_02"}
+local TP_POS = Vector3.new(78.55, 4.08, -217.50)
+local XMAS_POS = Vector3.new(-81.45, 3.94, -22.50)
+
+local function pressE(dur)
+    local t = tick()
+    while tick() - t < dur do
+        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+        task.wait(0.05)
+        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+        task.wait(0.05)
+    end
+end
+
+local function findRoom(item)
+    local doors = workspace:FindFirstChild("Doors")
+    if not doors then return end
+    local challenge = doors:FindFirstChild("Challenge")
+    if not challenge then return end
+    for _, room in ipairs(ROOMS) do
+        local r = challenge:FindFirstChild(room)
+        if r then
+            local holder = r:FindFirstChild("MatchDisplayPart") and r.MatchDisplayPart:FindFirstChild("SurfaceGui") and r.MatchDisplayPart.SurfaceGui:FindFirstChild("MatchDisplayFrame") and r.MatchDisplayPart.SurfaceGui.MatchDisplayFrame:FindFirstChild("ChallengeRewards") and r.MatchDisplayPart.SurfaceGui.MatchDisplayFrame.ChallengeRewards:FindFirstChild("Holder")
+            if holder and holder:FindFirstChild(item) then return room end
+        end
+    end
+end
+
+task.spawn(function()
+    while task.wait(1) do
+        if JoinChallenge.Value and not challengeRunning and DoorsRemote then
+            challengeRunning = true
+            isInChristmasEvent = false
+            local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+            if hrp and JoinChallenge.Value then
+                hrp.CFrame = CFrame.new(TP_POS)
+                task.wait(0.5)
+                if not JoinChallenge.Value then challengeRunning = false; continue end
+                pressE(0.5)
+                task.wait(0.2)
+                local item = Fluent.Options.SelectItem.Value
+                local room = findRoom(item)
+                if room and JoinChallenge.Value then
+                    challengeAttempts = 0
+                    task.wait(3)
+                    if not JoinChallenge.Value then challengeRunning = false; continue end
+                    local r = workspace.Doors.Challenge:FindFirstChild(room)
+                    if r and r:FindFirstChild("Outsider") then
+                        hrp.CFrame = r.Outsider.CFrame
+                        task.wait(0.5)
+                        if r:FindFirstChild("Teleporter") then
+                            local hum = player.Character:FindFirstChild("Humanoid")
+                            if hum then hum:MoveTo(r.Teleporter.Position); task.wait(1); hum:Move(Vector3.zero) end
+                            local t = tick()
+                            while tick() - t < 0.5 and JoinChallenge.Value do
+                                pcall(function() DoorsRemote:FireServer("Play", "Challenge") end)
+                                task.wait(0.05)
+                            end
+                            challengeStatus:SetDesc("Joined!")
+                        end
+                    end
+                else
+                    challengeAttempts = challengeAttempts + 1
+                    if challengeAttempts >= 5 and Fluent.Options.JoinChristmasEvent.Value and Fluent.Options.JoinEventNoItem.Value and ChristmasMapRemote then
+                        challengeAttempts = 0
+                        isInChristmasEvent = true
+                        hrp.CFrame = CFrame.new(XMAS_POS)
+                        task.wait(4)
+                        pressE(0.5)
+                        task.wait(0.5)
+                        local ui = pGui:FindFirstChild("LobbyRelatives") and pGui.LobbyRelatives:FindFirstChild("WinterEvent") and pGui.LobbyRelatives.WinterEvent:FindFirstChild("MainFrame") and pGui.LobbyRelatives.WinterEvent.MainFrame:FindFirstChild("Contents") and pGui.LobbyRelatives.WinterEvent.MainFrame.Contents:FindFirstChild("Buttons") and pGui.LobbyRelatives.WinterEvent.MainFrame.Contents.Buttons:FindFirstChild("Create")
+                        if ui then
+                            local t = tick()
+                            while tick() - t < 0.5 do pcall(function() ChristmasMapRemote:FireServer("Host") end); task.wait(0.05) end
+                            task.wait(0.3)
+                            t = tick()
+                            while tick() - t < 0.5 do pcall(function() DoorsRemote:FireServer("Play", "Custom") end); task.wait(0.05) end
+                            eventStatus:SetDesc("Christmas Event joined!")
+                        end
+                    else
+                        challengeStatus:SetDesc(string.format("Not found (Attempt %d/5)", challengeAttempts))
+                    end
+                end
+            end
+            challengeRunning = false
+            task.wait(5)
+        end
+    end
+end)
+
+-- UI Loop
+task.spawn(function()
+    while task.wait(0.5) do
+        statusPara:SetDesc("Wave: " .. currentWaveNum .. " | Ready: " .. (aggressiveSpam and "YES" or "NO"))
+        if not candyCapacityReached then
+            dataPara:SetDesc("Gifts: " .. giftCount .. " | Candy: " .. candyCount)
+        end
+        if not JoinChallenge.Value then
+            challengeStatus:SetDesc("Auto Join OFF")
+            eventStatus:SetDesc("Waiting...")
+        elseif not DoorsRemote then
+            challengeStatus:SetDesc("Not in lobby")
+        end
+        local url = Fluent.Options.WebhookURL.Value
+        if Fluent.Options.EnableWebhook.Value then
+            webhookStatus:SetDesc((url and url ~= "") and "🟢 Active" or "⚠️ No URL set")
+        else
+            webhookStatus:SetDesc((url and url ~= "") and "⚪ Configured but OFF" or "⚪ Not configured")
+        end
+    end
+end)
+
+SaveManager:SetLibrary(Fluent)
+InterfaceManager:SetLibrary(Fluent)
+InterfaceManager:BuildInterfaceSection(Tabs.Settings)
+SaveManager:BuildConfigSection(Tabs.Settings)
+Window:SelectTab(1)
+SaveManager:LoadAutoloadConfig()
