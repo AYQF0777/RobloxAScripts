@@ -2,7 +2,7 @@ local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/
 local SaveManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/SaveManager.lua"))()
 local InterfaceManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/InterfaceManager.lua"))()
 
--- Services
+-- Service
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
@@ -298,24 +298,37 @@ task.spawn(function()
     while task.wait(0.5) do
         local Result = pGui:FindFirstChild("Upboard") and pGui.Upboard:FindFirstChild("Result")
         if Result and Fluent.Options.AutoRetry.Value then
+            -- Special Christmas Event leave logic during xx:00 to xx:05
             if isInChristmasEvent and Fluent.Options.JoinChristmasEvent.Value and Fluent.Options.JoinEventNoItem.Value then
                 local sec = os.time() % 60
-                if sec <= 4 then
-                    eventStatus:SetDesc("Auto-leaving (xx:00-xx:04)")
-                    while Fluent.Options.AutoRetry.Value and os.time() % 60 <= 4 do
-                        if not (pGui.Upboard and pGui.Upboard.Result) then break end
-                        pcall(function() UpboardRemote:FireServer("Leave") end)
-                        task.wait(1)
+                if sec >= 0 and sec <= 5 then
+                    -- Immediately leave when result shows during this time window
+                    local Main = Result:FindFirstChild("Main")
+                    local Options = Main and Main:FindFirstChild("Options")
+                    local LeaveButton = Options and Options:FindFirstChild("LeaveButtonHolder")
+                    
+                    if LeaveButton then
+                        eventStatus:SetDesc("⚠️ Auto-leaving Christmas Event (xx:00-xx:05)")
+                        -- Keep clicking Leave until Result closes
+                        while Fluent.Options.AutoRetry.Value and pGui.Upboard and pGui.Upboard.Result do
+                            pcall(function() UpboardRemote:FireServer("Leave") end)
+                            task.wait(0.5) -- Faster clicks
+                        end
+                        isInChristmasEvent = false
+                        eventStatus:SetDesc("Left Christmas Event at xx:0" .. sec)
+                        task.wait(0.5)
+                        continue
                     end
-                    isInChristmasEvent = false
-                    continue
                 end
             end
+            
+            -- Normal auto retry logic
             task.wait(0.5)
             local Main = Result:FindFirstChild("Main")
             local Options = Main and Main:FindFirstChild("Options")
             local PlayAgain = Options and Options:FindFirstChild("PlayAgainButtonHolder")
             local Leave = Options and Options:FindFirstChild("LeaveButtonHolder")
+            
             if PlayAgain then
                 while Fluent.Options.AutoRetry.Value and pGui.Upboard and pGui.Upboard.Result do
                     pcall(function() UpboardRemote:FireServer("PlayAgain") end)
