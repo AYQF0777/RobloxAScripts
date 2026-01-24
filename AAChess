@@ -2,7 +2,7 @@ local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/
 local SaveManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/SaveManager.lua"))()
 local InterfaceManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/InterfaceManager.lua"))()
 
--- Service
+-- Services
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
@@ -96,6 +96,10 @@ Tabs.Dodge:AddSection("Spin Dodge")
 Tabs.Dodge:AddToggle("EnableSpin", {Title = "Spin Dodge", Default = false})
 Tabs.Dodge:AddInput("SpinRadius", {Title = "Radius", Default = "10", Numeric = true})
 Tabs.Dodge:AddInput("SpinSpeed", {Title = "Speed", Default = "5", Numeric = true})
+
+Tabs.Dodge:AddSection("Anti-AFK")
+Tabs.Dodge:AddToggle("AntiAFK", {Title = "Anti-AFK", Default = true})
+local afkStatus = Tabs.Dodge:AddParagraph({Title = "AFK Status", Content = "Anti-AFK: Enabled"})
 
 -- Webhook Tab
 Tabs.Webhook:AddSection("Discord Webhook")
@@ -421,6 +425,45 @@ RunService.Heartbeat:Connect(function(dt)
             hrp.CFrame = CFrame.new(centerPoint.X + math.cos(angle) * r, centerPoint.Y + 1, centerPoint.Z + math.sin(angle) * r) * CFrame.Angles(0, angle, 0)
         end
     else centerPoint = nil end
+end)
+
+-- Anti-AFK System
+local lastAfkAction = tick()
+task.spawn(function()
+    while task.wait(1) do
+        if Fluent.Options.AntiAFK.Value then
+            local timeSinceLastAction = tick() - lastAfkAction
+            
+            -- Perform anti-AFK action every 60 seconds
+            if timeSinceLastAction >= 60 then
+                -- Method 1: Move camera slightly
+                local camera = workspace.CurrentCamera
+                if camera then
+                    camera.CFrame = camera.CFrame * CFrame.Angles(0, math.rad(0.1), 0)
+                end
+                
+                -- Method 2: Send random key input
+                pcall(function()
+                    VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.W, false, game)
+                    task.wait(0.05)
+                    VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.W, false, game)
+                end)
+                
+                -- Method 3: Simulate mouse movement
+                pcall(function()
+                    VirtualInputManager:SendMouseMoveEvent(0, 0, game)
+                end)
+                
+                lastAfkAction = tick()
+                afkStatus:SetDesc("Anti-AFK: Active (Last: " .. os.date("%H:%M:%S") .. ")")
+            else
+                local remaining = 60 - math.floor(timeSinceLastAction)
+                afkStatus:SetDesc("Anti-AFK: Next in " .. remaining .. "s")
+            end
+        else
+            afkStatus:SetDesc("Anti-AFK: Disabled")
+        end
+    end
 end)
 
 -- Auto Join Challenge
