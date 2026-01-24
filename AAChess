@@ -1,4 +1,12 @@
-local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
+-- Auto Join Tab
+Tabs.AutoJoin:AddSection("Challenge Automation")
+local JoinChallenge = Tabs.AutoJoin:AddToggle("AutoJoinChallenge", {Title = "Auto Join Challenge", Default = false})
+Tabs.AutoJoin:AddDropdown("SelectItem", {
+    Title = "Select Target Item", 
+    Values = {"C_A_A_Power Fragment", "C_C_C_Devil Soul", "C_A_A_Deluxe Dice", "C_A_A_Dice"}, 
+    Default = "C_A_A_Power Fragment"
+})
+local challengeStatus = Tabs.AutoJoin:AddParagraph({Titlelocal Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
 local SaveManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/SaveManager.lua"))()
 local InterfaceManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/InterfaceManager.lua"))()
 
@@ -86,6 +94,10 @@ Tabs.AutoJoin:AddToggle("JoinChristmasEvent", {Title = "Join Christmas Event", D
 Tabs.AutoJoin:AddToggle("JoinEventNoItem", {Title = "Join Event if No Item Found", Default = false})
 local eventStatus = Tabs.AutoJoin:AddParagraph({Title = "Event Status", Content = "Waiting..."})
 
+Tabs.AutoJoin:AddSection("Developer Detection")
+Tabs.AutoJoin:AddToggle("AutoServerHop", {Title = "Auto Server Hop if Dev Found", Default = false})
+local devStatus = Tabs.AutoJoin:AddParagraph({Title = "Dev Status", Content = "No developers detected"})
+
 -- Dodge Tab
 Tabs.Dodge:AddSection("Spin Dodge")
 Tabs.Dodge:AddToggle("EnableSpin", {Title = "Spin Dodge", Default = false})
@@ -99,6 +111,91 @@ Tabs.Webhook:AddToggle("EnableWebhook", {Title = "Enable Webhook", Default = fal
 local webhookStatus = Tabs.Webhook:AddParagraph({Title = "Status", Content = "Webhook not configured"})
 
 --- LOGIC ---
+
+-- Developer Detection & Server Hop
+local TeleportService = game:GetService("TeleportService")
+
+local function checkForDevelopers()
+    for _, plr in pairs(Players:GetPlayers()) do
+        -- Check PlayerGui for developer icon/badge
+        local plrGui = plr:FindFirstChild("PlayerGui")
+        if plrGui then
+            -- Check for Overhead GUI (common dev indicator location)
+            local overheadGui = plrGui:FindFirstChild("OverheadGui") or plrGui:FindFirstChild("Overhead") or plrGui:FindFirstChild("DeveloperGui")
+            if overheadGui then
+                -- Look for hammer icon/image
+                for _, desc in pairs(overheadGui:GetDescendants()) do
+                    if desc:IsA("ImageLabel") or desc:IsA("ImageButton") then
+                        -- Check if image contains "hammer" or common dev icon IDs
+                        local img = desc.Image:lower()
+                        if img:find("hammer") or img:find("rbxassetid://7889706502") or img:find("admin") or img:find("developer") then
+                            return true, plr.Name
+                        end
+                    end
+                end
+            end
+        end
+        
+        -- Alternative: Check character for overhead GUI
+        local char = plr.Character
+        if char then
+            local head = char:FindFirstChild("Head")
+            if head then
+                for _, child in pairs(head:GetChildren()) do
+                    if child:IsA("BillboardGui") then
+                        for _, desc in pairs(child:GetDescendants()) do
+                            if desc:IsA("ImageLabel") or desc:IsA("ImageButton") then
+                                local img = desc.Image:lower()
+                                if img:find("hammer") or img:find("admin") or img:find("developer") then
+                                    return true, plr.Name
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return false
+end
+
+local function serverHop()
+    devStatus:SetDesc("🔄 Server hopping...")
+    local success, servers = pcall(function()
+        return game:GetService("HttpService"):JSONDecode(game:HttpGet("https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Asc&limit=100"))
+    end)
+    
+    if success and servers and servers.data then
+        for _, server in pairs(servers.data) do
+            if server.id ~= game.JobId and server.playing < server.maxPlayers then
+                pcall(function()
+                    TeleportService:TeleportToPlaceInstance(game.PlaceId, server.id, player)
+                end)
+                return
+            end
+        end
+    end
+    
+    -- Fallback: rejoin random server
+    TeleportService:Teleport(game.PlaceId, player)
+end
+
+-- Developer detection loop
+task.spawn(function()
+    while task.wait(5) do -- Check every 5 seconds
+        if Fluent.Options.AutoServerHop and Fluent.Options.AutoServerHop.Value then
+            local devFound, devName = checkForDevelopers()
+            if devFound then
+                devStatus:SetDesc("⚠️ Dev found: " .. devName .. " - Hopping!")
+                task.wait(1)
+                serverHop()
+                break
+            else
+                devStatus:SetDesc("✅ No developers detected")
+            end
+        end
+    end
+end)
 
 local function sendWebhook(url, data)
     local success, response = pcall(function()
