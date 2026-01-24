@@ -183,7 +183,7 @@ end
 -- Developer detection loop
 task.spawn(function()
     while task.wait(5) do -- Check every 5 seconds
-        if Fluent.Options.AutoServerHop and Fluent.Options.AutoServerHop.Value then
+        if Fluent.Options.AutoServerHop.Value then
             local devFound, devName = checkForDevelopers()
             if devFound then
                 devStatus:SetDesc("⚠️ Dev found: " .. devName .. " - Hopping!")
