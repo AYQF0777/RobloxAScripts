@@ -302,27 +302,19 @@ task.spawn(function()
     while task.wait(0.5) do
         local Result = pGui:FindFirstChild("Upboard") and pGui.Upboard:FindFirstChild("Result")
         if Result and Fluent.Options.AutoRetry.Value then
-            -- Special Christmas Event leave logic during xx:00 to xx:05
-            if isInChristmasEvent and Fluent.Options.JoinChristmasEvent.Value and Fluent.Options.JoinEventNoItem.Value then
+            -- Special Christmas Event teleport logic during xx:00 to xx:06
+            if game.PlaceId == 16695384334 and isInChristmasEvent and Fluent.Options.JoinChristmasEvent.Value and Fluent.Options.JoinEventNoItem.Value then
                 local sec = os.time() % 60
-                if sec >= 0 and sec <= 5 then
-                    -- Immediately leave when result shows during this time window
-                    local Main = Result:FindFirstChild("Main")
-                    local Options = Main and Main:FindFirstChild("Options")
-                    local LeaveButton = Options and Options:FindFirstChild("LeaveButtonHolder")
-                    
-                    if LeaveButton then
-                        eventStatus:SetDesc("⚠️ Auto-leaving Christmas Event (xx:00-xx:05)")
-                        -- Keep clicking Leave until Result closes
-                        while Fluent.Options.AutoRetry.Value and pGui.Upboard and pGui.Upboard.Result do
-                            pcall(function() UpboardRemote:FireServer("Leave") end)
-                            task.wait(0.5) -- Faster clicks
-                        end
-                        isInChristmasEvent = false
-                        eventStatus:SetDesc("Left Christmas Event at xx:0" .. sec)
-                        task.wait(0.5)
-                        continue
-                    end
+                if sec >= 0 and sec <= 6 then
+                    eventStatus:SetDesc("⚠️ Teleporting to lobby (xx:0" .. sec .. ")")
+                    task.wait(0.5)
+                    -- Teleport to lobby PlaceId
+                    pcall(function()
+                        TeleportService:Teleport(16695366828, player)
+                    end)
+                    isInChristmasEvent = false
+                    task.wait(5) -- Wait for teleport
+                    continue
                 end
             end
             
