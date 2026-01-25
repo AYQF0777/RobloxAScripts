@@ -19,6 +19,7 @@ local ChampionRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("C
 local XmasRemote = ReplicatedStorage.Remotes:FindFirstChild("GameModes") and ReplicatedStorage.Remotes.GameModes:FindFirstChild("XMasDifficulties")
 local NotifyRemote = ReplicatedStorage.Remotes:WaitForChild("Notify")
 local PossessionRemote = ReplicatedStorage.Remotes:WaitForChild("Possession")
+local SettingsRemote = ReplicatedStorage.Remotes:WaitForChild("Settings")
 local LobbyRelatives = ReplicatedStorage:FindFirstChild("Lobby Relatives")
 local DoorsRemote = LobbyRelatives and LobbyRelatives:FindFirstChild("Doors")
 local ChristmasMapRemote = LobbyRelatives and LobbyRelatives:FindFirstChild("ChristmasMap")
@@ -499,26 +500,34 @@ task.spawn(function()
                             Fluent.Options.JoinEventNoItem.Value
         
         if allTogglesOn or Fluent.Options.AutoJoinInfinite.Value then
-            local currentTime = os.time()
-            local sec = currentTime % 60
-            local targetWindow = "xx:00 - xx:10"
+            local currentTime = os.date("*t") -- Get time table
+            local hour = currentTime.hour
+            local min = currentTime.min
+            local sec = currentTime.sec
+            local targetWindow = "XX:00 - XX:05"
             
-            timeStatus:SetDesc(string.format("Current: xx:%02d | Target: %s", sec, targetWindow))
+            timeStatus:SetDesc(string.format("Current: %02d:%02d:%02d | Target: %s", hour, min, sec, targetWindow))
             
-            -- Check if we're in danger zone and need to teleport
-            if sec >= 0 and sec <= 10 and game.PlaceId ~= LOBBY_PLACEID then
+            -- Check if we're in danger zone (minutes 00 to 05)
+            if min >= 0 and min <= 5 and game.PlaceId ~= LOBBY_PLACEID then
                 local Result = pGui:FindFirstChild("Upboard") and pGui.Upboard:FindFirstChild("Result")
                 if Result and Result.Visible then
-                    timeStatus:SetDesc("🚨 TELEPORTING TO LOBBY! (xx:" .. string.format("%02d", sec) .. ")")
-                    task.wait(0.3)
-                    pcall(function()
-                        TeleportService:Teleport(LOBBY_PLACEID, player)
-                    end)
-                    task.wait(5)
+                    timeStatus:SetDesc(string.format("🚨 RETURNING TO LOBBY! (%02d:%02d)", hour, min))
+                    
+                    -- Fire ReturnToLobby remote for 1 second
+                    local fireStart = tick()
+                    while tick() - fireStart < 1 do
+                        pcall(function()
+                            SettingsRemote:FireServer("ReturnToLobby", Players:WaitForChild("RestartingA_A"))
+                        end)
+                        task.wait(0.1)
+                    end
+                    
+                    task.wait(2) -- Wait for lobby transition
                 end
             end
         else
-            timeStatus:SetDesc("Monitoring disabled (Enable all toggles)")
+            timeStatus:SetDesc("Monitoring disabled (Enable toggles)")
         end
     end
 end)
