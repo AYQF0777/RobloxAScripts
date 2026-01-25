@@ -18,9 +18,11 @@ local UpboardRemote = ReplicatedStorage.Remotes.Upboard
 local ChampionRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("Champion")
 local XmasRemote = ReplicatedStorage.Remotes:FindFirstChild("GameModes") and ReplicatedStorage.Remotes.GameModes:FindFirstChild("XMasDifficulties")
 local NotifyRemote = ReplicatedStorage.Remotes:WaitForChild("Notify")
+local PossessionRemote = ReplicatedStorage.Remotes:WaitForChild("Possession")
 local LobbyRelatives = ReplicatedStorage:FindFirstChild("Lobby Relatives")
 local DoorsRemote = LobbyRelatives and LobbyRelatives:FindFirstChild("Doors")
 local ChristmasMapRemote = LobbyRelatives and LobbyRelatives:FindFirstChild("ChristmasMap")
+local LimitlessRemote = LobbyRelatives and LobbyRelatives:FindFirstChild("Limitless")
 
 local player = Players.LocalPlayer
 local pGui = player:WaitForChild("PlayerGui")
@@ -35,7 +37,9 @@ local angle = 0
 local challengeRunning = false
 local challengeAttempts = 0
 local isInChristmasEvent = false
+local isInInfiniteMode = false
 local candyCapacityReached = false
+local LOBBY_PLACEID = 16695366828
 
 -- UI Window
 local Window = Fluent:CreateWindow({
@@ -52,6 +56,7 @@ local Tabs = {
     Ability = Window:AddTab({ Title = "Auto Ability", Icon = "zap" }), 
     AutoJoin = Window:AddTab({ Title = "Auto Join", Icon = "door-open" }),
     Dodge = Window:AddTab({ Title = "Dodge", Icon = "move" }),
+    Items = Window:AddTab({ Title = "Items", Icon = "package" }),
     Webhook = Window:AddTab({ Title = "Webhook", Icon = "send" }),
     Settings = Window:AddTab({ Title = "Settings", Icon = "settings" })
 }
@@ -87,6 +92,30 @@ Tabs.AutoJoin:AddToggle("JoinChristmasEvent", {Title = "Join Christmas Event", D
 Tabs.AutoJoin:AddToggle("JoinEventNoItem", {Title = "Join Event if No Item Found", Default = false})
 local eventStatus = Tabs.AutoJoin:AddParagraph({Title = "Event Status", Content = "Waiting..."})
 
+Tabs.AutoJoin:AddSection("Auto Join Infinite")
+Tabs.AutoJoin:AddToggle("AutoJoinInfinite", {Title = "Auto Join Infinite if No Item", Default = false})
+local infiniteStatus = Tabs.AutoJoin:AddParagraph({Title = "Infinite Status", Content = "Waiting..."})
+
+Tabs.AutoJoin:AddSection("Priority System (After 3 Failed Attempts)")
+Tabs.AutoJoin:AddDropdown("Priority1", {
+    Title = "1st Priority", 
+    Values = {"None", "Infinite Mode", "Christmas Event"}, 
+    Default = "Infinite Mode"
+})
+Tabs.AutoJoin:AddDropdown("Priority2", {
+    Title = "2nd Priority", 
+    Values = {"None", "Infinite Mode", "Christmas Event"}, 
+    Default = "Christmas Event"
+})
+Tabs.AutoJoin:AddDropdown("Priority3", {
+    Title = "3rd Priority", 
+    Values = {"None", "Infinite Mode", "Christmas Event"}, 
+    Default = "None"
+})
+
+Tabs.AutoJoin:AddSection("Auto Teleport Timer")
+local timeStatus = Tabs.AutoJoin:AddParagraph({Title = "Time Status", Content = "Monitoring disabled"})
+
 Tabs.AutoJoin:AddSection("Developer Detection")
 Tabs.AutoJoin:AddToggle("AutoServerHop", {Title = "Auto Server Hop if Dev Found", Default = false})
 local devStatus = Tabs.AutoJoin:AddParagraph({Title = "Dev Status", Content = "Scanning disabled"})
@@ -100,6 +129,11 @@ Tabs.Dodge:AddInput("SpinSpeed", {Title = "Speed", Default = "5", Numeric = true
 Tabs.Dodge:AddSection("Anti-AFK")
 Tabs.Dodge:AddToggle("AntiAFK", {Title = "Anti-AFK", Default = true})
 local afkStatus = Tabs.Dodge:AddParagraph({Title = "AFK Status", Content = "Anti-AFK: Enabled"})
+
+-- Items Tab
+Tabs.Items:AddSection("Bag Opener")
+Tabs.Items:AddToggle("UseAllBags", {Title = "Use All Bags", Default = false})
+local bagStatus = Tabs.Items:AddParagraph({Title = "Bag Status", Content = "Disabled"})
 
 -- Webhook Tab
 Tabs.Webhook:AddSection("Discord Webhook")
@@ -302,23 +336,7 @@ task.spawn(function()
     while task.wait(0.5) do
         local Result = pGui:FindFirstChild("Upboard") and pGui.Upboard:FindFirstChild("Result")
         if Result and Fluent.Options.AutoRetry.Value then
-            -- Special Christmas Event teleport logic during xx:00 to xx:06
-            if game.PlaceId == 16695384334 and isInChristmasEvent and Fluent.Options.JoinChristmasEvent.Value and Fluent.Options.JoinEventNoItem.Value then
-                local sec = os.time() % 60
-                if sec >= 0 and sec <= 6 then
-                    eventStatus:SetDesc("⚠️ Teleporting to lobby (xx:0" .. sec .. ")")
-                    task.wait(0.5)
-                    -- Teleport to lobby PlaceId
-                    pcall(function()
-                        TeleportService:Teleport(16695366828, player)
-                    end)
-                    isInChristmasEvent = false
-                    task.wait(5) -- Wait for teleport
-                    continue
-                end
-            end
-            
-            -- Normal auto retry logic
+            -- Normal auto retry logic (removed special Christmas teleport)
             task.wait(0.5)
             local Main = Result:FindFirstChild("Main")
             local Options = Main and Main:FindFirstChild("Options")
@@ -428,20 +446,17 @@ task.spawn(function()
             
             -- Perform anti-AFK action every 60 seconds
             if timeSinceLastAction >= 60 then
-                -- Method 1: Move camera slightly
                 local camera = workspace.CurrentCamera
                 if camera then
                     camera.CFrame = camera.CFrame * CFrame.Angles(0, math.rad(0.1), 0)
                 end
                 
-                -- Method 2: Send random key input
                 pcall(function()
                     VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.W, false, game)
                     task.wait(0.05)
                     VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.W, false, game)
                 end)
                 
-                -- Method 3: Simulate mouse movement
                 pcall(function()
                     VirtualInputManager:SendMouseMoveEvent(0, 0, game)
                 end)
@@ -458,10 +473,61 @@ task.spawn(function()
     end
 end)
 
--- Auto Join Challenge
+-- Use All Bags (Items Tab)
+task.spawn(function()
+    while task.wait(4) do
+        if Fluent.Options.UseAllBags.Value and game.PlaceId == LOBBY_PLACEID then
+            pcall(function()
+                PossessionRemote:FireServer("UseItem_Ten", 126)
+            end)
+            bagStatus:SetDesc("✅ Using bags... (Last: " .. os.date("%H:%M:%S") .. ")")
+        else
+            if Fluent.Options.UseAllBags.Value then
+                bagStatus:SetDesc("⚠️ Not in lobby")
+            else
+                bagStatus:SetDesc("Disabled")
+            end
+        end
+    end
+end)
+
+-- Auto Teleport Timer Monitor
+task.spawn(function()
+    while task.wait(1) do
+        local allTogglesOn = Fluent.Options.AutoJoinChallenge.Value and 
+                            Fluent.Options.JoinChristmasEvent.Value and 
+                            Fluent.Options.JoinEventNoItem.Value
+        
+        if allTogglesOn or Fluent.Options.AutoJoinInfinite.Value then
+            local currentTime = os.time()
+            local sec = currentTime % 60
+            local targetWindow = "xx:00 - xx:10"
+            
+            timeStatus:SetDesc(string.format("Current: xx:%02d | Target: %s", sec, targetWindow))
+            
+            -- Check if we're in danger zone and need to teleport
+            if sec >= 0 and sec <= 10 and game.PlaceId ~= LOBBY_PLACEID then
+                local Result = pGui:FindFirstChild("Upboard") and pGui.Upboard:FindFirstChild("Result")
+                if Result and Result.Visible then
+                    timeStatus:SetDesc("🚨 TELEPORTING TO LOBBY! (xx:" .. string.format("%02d", sec) .. ")")
+                    task.wait(0.3)
+                    pcall(function()
+                        TeleportService:Teleport(LOBBY_PLACEID, player)
+                    end)
+                    task.wait(5)
+                end
+            end
+        else
+            timeStatus:SetDesc("Monitoring disabled (Enable all toggles)")
+        end
+    end
+end)
+
+-- Auto Join Challenge & Infinite Mode
 local ROOMS = {"Hourly_01_01", "Hourly_01_02", "Hourly_02_01", "Hourly_02_02", "Hourly_03_01", "Hourly_03_02"}
 local TP_POS = Vector3.new(78.55, 4.08, -217.50)
 local XMAS_POS = Vector3.new(-81.45, 3.94, -22.50)
+local INFINITE_POS = Vector3.new(-177.96, 30.14, 41.08)
 
 local function pressE(dur)
     local t = tick()
@@ -492,6 +558,7 @@ task.spawn(function()
         if JoinChallenge.Value and not challengeRunning and DoorsRemote then
             challengeRunning = true
             isInChristmasEvent = false
+            isInInfiniteMode = false
             local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
             if hrp and JoinChallenge.Value then
                 hrp.CFrame = CFrame.new(TP_POS)
@@ -522,24 +589,92 @@ task.spawn(function()
                     end
                 else
                     challengeAttempts = challengeAttempts + 1
-                    if challengeAttempts >= 3 and Fluent.Options.JoinChristmasEvent.Value and Fluent.Options.JoinEventNoItem.Value and ChristmasMapRemote then
+                    challengeStatus:SetDesc(string.format("Not found (Attempt %d/3)", challengeAttempts))
+                    
+                    -- After 3 failed attempts, use priority system
+                    if challengeAttempts >= 3 then
                         challengeAttempts = 0
-                        isInChristmasEvent = true
-                        hrp.CFrame = CFrame.new(XMAS_POS)
-                        task.wait(4)
-                        pressE(0.5)
-                        task.wait(0.5)
-                        local ui = pGui:FindFirstChild("LobbyRelatives") and pGui.LobbyRelatives:FindFirstChild("WinterEvent") and pGui.LobbyRelatives.WinterEvent:FindFirstChild("MainFrame") and pGui.LobbyRelatives.WinterEvent.MainFrame:FindFirstChild("Contents") and pGui.LobbyRelatives.WinterEvent.MainFrame.Contents:FindFirstChild("Buttons") and pGui.LobbyRelatives.WinterEvent.MainFrame.Contents.Buttons:FindFirstChild("Create")
-                        if ui then
-                            local t = tick()
-                            while tick() - t < 0.5 do pcall(function() ChristmasMapRemote:FireServer("Host") end); task.wait(0.05) end
-                            task.wait(0.3)
-                            t = tick()
-                            while tick() - t < 0.5 do pcall(function() DoorsRemote:FireServer("Play", "Custom") end); task.wait(0.05) end
-                            eventStatus:SetDesc("Christmas Event joined!")
+                        
+                        local function tryMode(modeName)
+                            if modeName == "Infinite Mode" and Fluent.Options.AutoJoinInfinite.Value and LimitlessRemote then
+                                isInInfiniteMode = true
+                                infiniteStatus:SetDesc("3 attempts failed. Joining Infinite...")
+                                
+                                task.wait(2)
+                                
+                                hrp.CFrame = CFrame.new(INFINITE_POS)
+                                task.wait(0.5)
+                                
+                                local doors = workspace:FindFirstChild("Doors")
+                                local limitless = doors and doors:FindFirstChild("Limitless")
+                                local limitless08 = limitless and limitless:FindFirstChild("Limitless_08")
+                                local teleporter = limitless08 and limitless08:FindFirstChild("Teleporter")
+                                
+                                if teleporter then
+                                    local hum = player.Character:FindFirstChild("Humanoid")
+                                    if hum then
+                                        hum:MoveTo(teleporter.Position)
+                                        task.wait(0.5)
+                                        hum:Move(Vector3.zero)
+                                    end
+                                    
+                                    task.wait(0.5)
+                                    
+                                    local t = tick()
+                                    while tick() - t < 0.3 do
+                                        pcall(function()
+                                            LimitlessRemote:FireServer("Update", "{\"Flag\":\"Limitless\",\"OnlyFriend\":false}")
+                                        end)
+                                        task.wait(0.05)
+                                    end
+                                    
+                                    t = tick()
+                                    while tick() - t < 0.3 do
+                                        pcall(function()
+                                            DoorsRemote:FireServer("Play", "Limitless")
+                                        end)
+                                        task.wait(0.05)
+                                    end
+                                    
+                                    infiniteStatus:SetDesc("Infinite Mode joined!")
+                                    return true
+                                else
+                                    infiniteStatus:SetDesc("Teleporter not found")
+                                    return false
+                                end
+                            elseif modeName == "Christmas Event" and Fluent.Options.JoinChristmasEvent.Value and Fluent.Options.JoinEventNoItem.Value and ChristmasMapRemote then
+                                isInChristmasEvent = true
+                                eventStatus:SetDesc("3 attempts failed. Joining Christmas...")
+                                
+                                hrp.CFrame = CFrame.new(XMAS_POS)
+                                task.wait(4)
+                                pressE(0.5)
+                                task.wait(0.5)
+                                local ui = pGui:FindFirstChild("LobbyRelatives") and pGui.LobbyRelatives:FindFirstChild("WinterEvent") and pGui.LobbyRelatives.WinterEvent:FindFirstChild("MainFrame") and pGui.LobbyRelatives.WinterEvent.MainFrame:FindFirstChild("Contents") and pGui.LobbyRelatives.WinterEvent.MainFrame.Contents:FindFirstChild("Buttons") and pGui.LobbyRelatives.WinterEvent.MainFrame.Contents.Buttons:FindFirstChild("Create")
+                                if ui then
+                                    local t = tick()
+                                    while tick() - t < 0.5 do pcall(function() ChristmasMapRemote:FireServer("Host") end); task.wait(0.05) end
+                                    task.wait(0.3)
+                                    t = tick()
+                                    while tick() - t < 0.5 do pcall(function() DoorsRemote:FireServer("Play", "Custom") end); task.wait(0.05) end
+                                    eventStatus:SetDesc("Christmas Event joined!")
+                                    return true
+                                end
+                                return false
+                            end
+                            return false
                         end
-                    else
-                        challengeStatus:SetDesc(string.format("Not found (Attempt %d/3)", challengeAttempts))
+                        
+                        -- Try priorities in order
+                        local priority1 = Fluent.Options.Priority1.Value
+                        local priority2 = Fluent.Options.Priority2.Value
+                        local priority3 = Fluent.Options.Priority3.Value
+                        
+                        if not tryMode(priority1) then
+                            if not tryMode(priority2) then
+                                tryMode(priority3)
+                            end
+                        end
                     end
                 end
             end
