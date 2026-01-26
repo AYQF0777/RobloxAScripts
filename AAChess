@@ -40,6 +40,7 @@ local challengeAttempts = 0
 local isInChristmasEvent = false
 local isInInfiniteMode = false
 local candyCapacityReached = false
+local bagUsageStopped = false
 local LOBBY_PLACEID = 16695366828
 
 -- UI Window
@@ -386,9 +387,14 @@ end)
 
 -- Candy capacity
 NotifyRemote.OnClientEvent:Connect(function(msgType, msgContent)
-    if msgType == "Error" and msgContent and msgContent:find("Daily Capacity") then
-        candyCapacityReached = true
-        dataPara:SetDesc("⚠️ CANDY LIMIT REACHED!")
+    if msgType == "Error" and msgContent then
+        if msgContent:find("Daily Capacity") then
+            candyCapacityReached = true
+            dataPara:SetDesc("⚠️ CANDY LIMIT REACHED!")
+        elseif msgContent:find("This Item is not usable") or msgContent:find("not usable") then
+            bagUsageStopped = true
+            bagStatus:SetDesc("⚠️ Bags depleted - Stopped")
+        end
     end
 end)
 
@@ -477,13 +483,23 @@ end)
 -- Use All Bags (Items Tab)
 task.spawn(function()
     while task.wait(4) do
-        if Fluent.Options.UseAllBags.Value and game.PlaceId == LOBBY_PLACEID then
+        if Fluent.Options.UseAllBags.Value and game.PlaceId == LOBBY_PLACEID and not bagUsageStopped then
+            -- Use bag ID 133
             pcall(function()
-                PossessionRemote:FireServer("UseItem_Ten", 126)
+                PossessionRemote:FireServer("UseItem_Ten", 133)
             end)
+            task.wait(0.1)
+            
+            -- Use bag ID 128
+            pcall(function()
+                PossessionRemote:FireServer("UseItem_Ten", 128)
+            end)
+            
             bagStatus:SetDesc("✅ Using bags... (Last: " .. os.date("%H:%M:%S") .. ")")
         else
-            if Fluent.Options.UseAllBags.Value then
+            if bagUsageStopped then
+                bagStatus:SetDesc("⚠️ Bags depleted - Stopped")
+            elseif Fluent.Options.UseAllBags.Value then
                 bagStatus:SetDesc("⚠️ Not in lobby")
             else
                 bagStatus:SetDesc("Disabled")
