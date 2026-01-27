@@ -11,22 +11,27 @@ local VirtualInputManager = game:GetService("VirtualInputManager")
 local HttpService = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
 
--- Game Objects
+-- Cache player objects
+local player = Players.LocalPlayer
+local pGui = player:WaitForChild("PlayerGui")
+
+-- Game Objects (cached)
 local ServerInfo = ReplicatedStorage:WaitForChild("Server Information")
 local WaveValue = ServerInfo:WaitForChild("Wave")
-local UpboardRemote = ReplicatedStorage.Remotes.Upboard
-local ChampionRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("Champion")
-local XmasRemote = ReplicatedStorage.Remotes:FindFirstChild("GameModes") and ReplicatedStorage.Remotes.GameModes:FindFirstChild("XMasDifficulties")
-local NotifyRemote = ReplicatedStorage.Remotes:WaitForChild("Notify")
-local PossessionRemote = ReplicatedStorage.Remotes:WaitForChild("Possession")
-local SettingsRemote = ReplicatedStorage.Remotes:WaitForChild("Settings")
+local Remotes = ReplicatedStorage:WaitForChild("Remotes")
+local UpboardRemote = Remotes.Upboard
+local ChampionRemote = Remotes:WaitForChild("Champion")
+local XmasRemote = Remotes:FindFirstChild("GameModes") and Remotes.GameModes:FindFirstChild("XMasDifficulties")
+local NotifyRemote = Remotes:WaitForChild("Notify")
+local PossessionRemote = Remotes:WaitForChild("Possession")
+local SettingsRemote = Remotes:WaitForChild("Settings")
+local AwardRemote = Remotes:WaitForChild("Award")
+
 local LobbyRelatives = ReplicatedStorage:FindFirstChild("Lobby Relatives")
 local DoorsRemote = LobbyRelatives and LobbyRelatives:FindFirstChild("Doors")
 local ChristmasMapRemote = LobbyRelatives and LobbyRelatives:FindFirstChild("ChristmasMap")
 local LimitlessRemote = LobbyRelatives and LobbyRelatives:FindFirstChild("Limitless")
-
-local player = Players.LocalPlayer
-local pGui = player:WaitForChild("PlayerGui")
+local ChristmasShopRemote = LobbyRelatives and LobbyRelatives:FindFirstChild("ChristmasShop")
 
 -- State
 local aggressiveSpam = false
@@ -41,7 +46,24 @@ local isInChristmasEvent = false
 local isInInfiniteMode = false
 local candyCapacityReached = false
 local bagUsageStopped = false
+
+-- Constants
 local LOBBY_PLACEID = 16695366828
+local PRIORITY_BAG_IDS = {132, 141, 133, 128}
+local CHALLENGE_ROOMS = {"Hourly_01_01", "Hourly_01_02", "Hourly_02_01", "Hourly_02_02", "Hourly_03_01", "Hourly_03_02"}
+local TICKET_IDS = {105, 100, 101, 102, 103, 104, 106, 107, 108, 109, 110}
+local TP_POS = Vector3.new(78.55, 4.08, -217.50)
+local XMAS_POS = Vector3.new(-81.45, 3.94, -22.50)
+local INFINITE_POS = Vector3.new(-177.96, 30.14, 41.08)
+
+-- NEW: Bag system variables
+local activeBagIds = {} -- Store both working bag IDs
+local bagCheckInProgress = false
+local scanningComplete = false
+
+-- NEW: Ticket buying variables
+local ticketBuyDetected = false
+local noCurrency = false
 
 -- UI Window
 local Window = Fluent:CreateWindow({
@@ -98,21 +120,26 @@ Tabs.AutoJoin:AddSection("Auto Join Infinite")
 Tabs.AutoJoin:AddToggle("AutoJoinInfinite", {Title = "Auto Join Infinite if No Item", Default = false})
 local infiniteStatus = Tabs.AutoJoin:AddParagraph({Title = "Infinite Status", Content = "Waiting..."})
 
+-- NEW: Winter Ticket Section
+Tabs.AutoJoin:AddSection("Winter Ticket Automation")
+Tabs.AutoJoin:AddToggle("UseWinterTicket", {Title = "Auto Join Winter Ticket If No Specific Item", Default = false})
+local winterTicketStatus = Tabs.AutoJoin:AddParagraph({Title = "Winter Ticket Status", Content = "Waiting..."})
+
 Tabs.AutoJoin:AddSection("Priority System (After 3 Failed Attempts)")
 Tabs.AutoJoin:AddDropdown("Priority1", {
     Title = "1st Priority", 
-    Values = {"None", "Infinite Mode", "Christmas Event"}, 
-    Default = "Infinite Mode"
+    Values = {"None", "Winter Ticket", "Infinite Mode", "Christmas Event"}, 
+    Default = "Winter Ticket"
 })
 Tabs.AutoJoin:AddDropdown("Priority2", {
     Title = "2nd Priority", 
-    Values = {"None", "Infinite Mode", "Christmas Event"}, 
-    Default = "Christmas Event"
+    Values = {"None", "Winter Ticket", "Infinite Mode", "Christmas Event"}, 
+    Default = "Infinite Mode"
 })
 Tabs.AutoJoin:AddDropdown("Priority3", {
     Title = "3rd Priority", 
-    Values = {"None", "Infinite Mode", "Christmas Event"}, 
-    Default = "None"
+    Values = {"None", "Winter Ticket", "Infinite Mode", "Christmas Event"}, 
+    Default = "Christmas Event"
 })
 
 Tabs.AutoJoin:AddSection("Auto Teleport Timer")
@@ -136,6 +163,10 @@ local afkStatus = Tabs.Dodge:AddParagraph({Title = "AFK Status", Content = "Anti
 Tabs.Items:AddSection("Bag Opener")
 Tabs.Items:AddToggle("UseAllBags", {Title = "Use All Bags", Default = false})
 local bagStatus = Tabs.Items:AddParagraph({Title = "Bag Status", Content = "Disabled"})
+
+Tabs.Items:AddSection("Ticket Buyer")
+Tabs.Items:AddToggle("AutoBuyTicket", {Title = "Auto Buy Ticket", Default = false})
+local ticketStatus = Tabs.Items:AddParagraph({Title = "Ticket Status", Content = "Disabled"})
 
 -- Webhook Tab
 Tabs.Webhook:AddSection("Discord Webhook")
@@ -193,9 +224,13 @@ end
 
 Tabs.Webhook:AddButton({Title = "Test Webhook", Description = "Send test message", Callback = testWebhook})
 
--- Developer Detection
+-- Developer Detection (Optimized)
+local DEV_IMAGE_PATTERNS = {"hammer", "admin", "developer"}
+
 local function checkForDevelopers()
     for _, plr in pairs(Players:GetPlayers()) do
+        if plr == player then continue end -- Skip self
+        
         local plrGui = plr:FindFirstChild("PlayerGui")
         if plrGui then
             local overheadGui = plrGui:FindFirstChild("OverheadGui") or plrGui:FindFirstChild("Overhead") or plrGui:FindFirstChild("DeveloperGui")
@@ -203,8 +238,10 @@ local function checkForDevelopers()
                 for _, desc in pairs(overheadGui:GetDescendants()) do
                     if desc:IsA("ImageLabel") or desc:IsA("ImageButton") then
                         local img = desc.Image:lower()
-                        if img:find("hammer") or img:find("admin") or img:find("developer") then
-                            return true, plr.Name
+                        for _, pattern in ipairs(DEV_IMAGE_PATTERNS) do
+                            if img:find(pattern) then
+                                return true, plr.Name
+                            end
                         end
                     end
                 end
@@ -220,8 +257,10 @@ local function checkForDevelopers()
                         for _, desc in pairs(child:GetDescendants()) do
                             if desc:IsA("ImageLabel") or desc:IsA("ImageButton") then
                                 local img = desc.Image:lower()
-                                if img:find("hammer") or img:find("admin") or img:find("developer") then
-                                    return true, plr.Name
+                                for _, pattern in ipairs(DEV_IMAGE_PATTERNS) do
+                                    if img:find(pattern) then
+                                        return true, plr.Name
+                                    end
                                 end
                             end
                         end
@@ -271,21 +310,36 @@ task.spawn(function()
     end
 end)
 
--- Webhook Result Detector
+-- Webhook Result Detector (Optimized)
 task.spawn(function()
     while task.wait(1) do
         if Fluent.Options.EnableWebhook.Value then
-            local Result = pGui:FindFirstChild("Upboard") and pGui.Upboard:FindFirstChild("Result")
+            local Upboard = pGui:FindFirstChild("Upboard")
+            local Result = Upboard and Upboard:FindFirstChild("Result")
+            
             if Result and Result.Visible then
                 task.wait(2.5)
+                
                 local Main = Result:FindFirstChild("Main")
                 if Main then
+                    -- Cache all needed references
                     local mapName = Main.MapLabel and Main.MapLabel.Text or "Unknown"
+                    local HeaderVictory = Result:FindFirstChild("HeaderVictory")
+                    local HeaderDefeated = Result:FindFirstChild("HeaderDefeated")
+                    
                     local status, color = "Unknown", 8421504
-                    if Result.HeaderVictory and Result.HeaderVictory.Visible then status, color = "✅ Victory", 65280
-                    elseif Result.HeaderDefeated and Result.HeaderDefeated.Visible then status, color = "❌ Defeated", 16711680 end
-                    local time = Main.Statistics and Main.Statistics.Time and Main.Statistics.Time.CategoryStat and Main.Statistics.Time.CategoryStat.Text or "N/A"
-                    local rewards = Main.Rewards and Main.Rewards.ScrollingFrame and formatRewards(Main.Rewards.ScrollingFrame) or "No rewards"
+                    if HeaderVictory and HeaderVictory.Visible then 
+                        status, color = "✅ Victory", 65280
+                    elseif HeaderDefeated and HeaderDefeated.Visible then 
+                        status, color = "❌ Defeated", 16711680 
+                    end
+                    
+                    local Statistics = Main:FindFirstChild("Statistics")
+                    local Time = Statistics and Statistics:FindFirstChild("Time")
+                    local time = Time and Time.CategoryStat and Time.CategoryStat.Text or "N/A"
+                    
+                    local Rewards = Main:FindFirstChild("Rewards")
+                    local rewards = Rewards and Rewards.ScrollingFrame and formatRewards(Rewards.ScrollingFrame) or "No rewards"
                     
                     local success = sendWebhook(Fluent.Options.WebhookURL.Value, {
                         username = "Aden Hub",
@@ -301,9 +355,15 @@ task.spawn(function()
                             timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ")
                         }}
                     })
+                    
                     webhookStatus:SetDesc(success and "✅ Sent: " .. os.date("%H:%M:%S") or "❌ Failed")
                 end
-                repeat task.wait(1); Result = pGui.Upboard and pGui.Upboard.Result until not Result or not Result.Visible
+                
+                -- Wait for Result to close
+                repeat 
+                    task.wait(1)
+                    Result = Upboard and Upboard:FindFirstChild("Result")
+                until not Result or not Result.Visible
             end
         end
     end
@@ -333,27 +393,31 @@ task.spawn(function()
     end
 end)
 
--- Auto Retry
+-- Auto Retry (Optimized)
 task.spawn(function()
     while task.wait(0.5) do
-        local Result = pGui:FindFirstChild("Upboard") and pGui.Upboard:FindFirstChild("Result")
-        if Result and Fluent.Options.AutoRetry.Value then
-            -- Normal auto retry logic (removed special Christmas teleport)
-            task.wait(0.5)
-            local Main = Result:FindFirstChild("Main")
-            local Options = Main and Main:FindFirstChild("Options")
-            local PlayAgain = Options and Options:FindFirstChild("PlayAgainButtonHolder")
-            local Leave = Options and Options:FindFirstChild("LeaveButtonHolder")
+        if Fluent.Options.AutoRetry.Value then
+            local Upboard = pGui:FindFirstChild("Upboard")
+            local Result = Upboard and Upboard:FindFirstChild("Result")
             
-            if PlayAgain then
-                while Fluent.Options.AutoRetry.Value and pGui.Upboard and pGui.Upboard.Result do
-                    pcall(function() UpboardRemote:FireServer("PlayAgain") end)
-                    task.wait(1)
-                end
-            elseif Leave then
-                while Fluent.Options.AutoRetry.Value and pGui.Upboard and pGui.Upboard.Result do
-                    pcall(function() UpboardRemote:FireServer("Leave") end)
-                    task.wait(1)
+            if Result and Result.Visible then
+                task.wait(0.5)
+                
+                local Main = Result:FindFirstChild("Main")
+                local Options = Main and Main:FindFirstChild("Options")
+                
+                if Options then
+                    local PlayAgain = Options:FindFirstChild("PlayAgainButtonHolder")
+                    local Leave = Options:FindFirstChild("LeaveButtonHolder")
+                    
+                    local remoteAction = PlayAgain and "PlayAgain" or (Leave and "Leave")
+                    
+                    if remoteAction then
+                        while Fluent.Options.AutoRetry.Value and Upboard and Upboard.Result and Upboard.Result.Visible do
+                            pcall(function() UpboardRemote:FireServer(remoteAction) end)
+                            task.wait(1)
+                        end
+                    end
                 end
             end
         end
@@ -385,45 +449,108 @@ task.spawn(function()
     end
 end)
 
--- Candy capacity
+-- IMPROVED: Candy capacity and Bag detection
+local currentTestingBagId = nil
+
 NotifyRemote.OnClientEvent:Connect(function(msgType, msgContent)
     if msgType == "Error" and msgContent then
         if msgContent:find("Daily Capacity") then
             candyCapacityReached = true
             dataPara:SetDesc("⚠️ CANDY LIMIT REACHED!")
         elseif msgContent:find("This Item is not usable") or msgContent:find("not usable") then
-            bagUsageStopped = true
-            bagStatus:SetDesc("⚠️ Bags depleted - Stopped")
+            -- This bag doesn't work, continue scanning
+            if currentTestingBagId then
+                bagStatus:SetDesc("⚠️ Bag " .. currentTestingBagId .. " not usable, continuing scan...")
+                currentTestingBagId = nil
+            end
+        end
+    elseif msgType == "Prompt" and type(msgContent) == "table" then
+        -- Check if this is a bag opening
+        if msgContent.RE or msgContent.Dice or msgContent.AbilityShard or msgContent.PMedal or msgContent.DDice then
+            if currentTestingBagId and not table.find(activeBagIds, currentTestingBagId) then
+                table.insert(activeBagIds, currentTestingBagId)
+                bagStatus:SetDesc("✅ Found working bag: " .. currentTestingBagId .. " (Total: " .. #activeBagIds .. ")")
+                
+                -- Claim the rewards
+                task.spawn(function()
+                    task.wait(0.1)
+                    pcall(function()
+                        AwardRemote:FireServer("Prompt", msgContent)
+                    end)
+                end)
+                
+                currentTestingBagId = nil
+            end
+        -- Check if this is a ticket purchase
+        elseif msgContent["Winter Town Ticket"] then
+            ticketBuyDetected = true
+            noCurrency = false
+            ticketStatus:SetDesc("✅ Ticket purchased! (" .. os.date("%H:%M:%S") .. ")")
+            
+            -- Claim the ticket
+            task.spawn(function()
+                task.wait(0.1)
+                pcall(function()
+                    AwardRemote:FireServer("Prompt", msgContent)
+                end)
+            end)
         end
     end
 end)
 
--- Auto Collect
+-- Auto Collect (Optimized)
 task.spawn(function()
     while task.wait(1) do
         if Fluent.Options.AutoCollect.Value and not isCollectingItems and not candyCapacityReached then
-            local char, hrp = player.Character, player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+            local char = player.Character
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            
             if hrp then
                 local items = {}
-                for _, container in pairs(Workspace:GetChildren()) do
-                    if container.Name:lower() == "candy" or container.Name:lower() == "gift" then
-                        for _, item in pairs(container:GetChildren()) do
-                            table.insert(items, {Obj = item, Type = container.Name:lower()})
-                        end
+                local candy = Workspace:FindFirstChild("Candy")
+                local gift = Workspace:FindFirstChild("Gift")
+                
+                -- Collect from Candy container
+                if candy then
+                    for _, item in pairs(candy:GetChildren()) do
+                        table.insert(items, {Obj = item, Type = "candy"})
                     end
                 end
+                
+                -- Collect from Gift container
+                if gift then
+                    for _, item in pairs(gift:GetChildren()) do
+                        table.insert(items, {Obj = item, Type = "gift"})
+                    end
+                end
+                
                 if #items > 0 then
                     isCollectingItems = true
                     local orig = char:GetPivot()
+                    
                     for _, data in ipairs(items) do
-                        if not Fluent.Options.AutoCollect.Value or candyCapacityReached then char:PivotTo(orig); break end
+                        if not Fluent.Options.AutoCollect.Value or candyCapacityReached then 
+                            char:PivotTo(orig)
+                            break 
+                        end
+                        
                         if data.Obj and data.Obj.Parent then
                             char:PivotTo(data.Obj:GetPivot())
-                            if data.Type == "candy" then candyCount = candyCount + 1 else giftCount = giftCount + 1 end
+                            
+                            if data.Type == "candy" then 
+                                candyCount = candyCount + 1 
+                            else 
+                                giftCount = giftCount + 1 
+                            end
+                            
                             task.wait(0.5)
                         end
                     end
-                    if Fluent.Options.AutoCollect.Value and not candyCapacityReached then char:PivotTo(orig) end
+                    
+                    if Fluent.Options.AutoCollect.Value and not candyCapacityReached then 
+                        char:PivotTo(orig) 
+                    end
+                    
                     isCollectingItems = false
                 end
             end
@@ -431,17 +558,32 @@ task.spawn(function()
     end
 end)
 
--- Spin Dodge
+-- Spin Dodge (Optimized)
 RunService.Heartbeat:Connect(function(dt)
     if Fluent.Options.EnableSpin.Value and not isCollectingItems then
-        local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+        local char = player.Character
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        
         if hrp then
             if not centerPoint then centerPoint = hrp.Position end
-            angle = angle + ((tonumber(Fluent.Options.SpinSpeed.Value) or 5) * dt * -1)
-            local r = tonumber(Fluent.Options.SpinRadius.Value) or 10
-            hrp.CFrame = CFrame.new(centerPoint.X + math.cos(angle) * r, centerPoint.Y + 1, centerPoint.Z + math.sin(angle) * r) * CFrame.Angles(0, angle, 0)
+            
+            local spinSpeed = tonumber(Fluent.Options.SpinSpeed.Value) or 5
+            local radius = tonumber(Fluent.Options.SpinRadius.Value) or 10
+            
+            angle = angle + (spinSpeed * dt * -1)
+            
+            local cos = math.cos(angle)
+            local sin = math.sin(angle)
+            
+            hrp.CFrame = CFrame.new(
+                centerPoint.X + cos * radius, 
+                centerPoint.Y + 1, 
+                centerPoint.Z + sin * radius
+            ) * CFrame.Angles(0, angle, 0)
         end
-    else centerPoint = nil end
+    else 
+        centerPoint = nil 
+    end
 end)
 
 -- Anti-AFK System
@@ -451,7 +593,6 @@ task.spawn(function()
         if Fluent.Options.AntiAFK.Value then
             local timeSinceLastAction = tick() - lastAfkAction
             
-            -- Perform anti-AFK action every 60 seconds
             if timeSinceLastAction >= 60 then
                 local camera = workspace.CurrentCamera
                 if camera then
@@ -480,30 +621,103 @@ task.spawn(function()
     end
 end)
 
--- Use All Bags (Items Tab)
+-- IMPROVED: Use All Bags (Items Tab) - Priority Scan Only
 task.spawn(function()
-    while task.wait(4) do
+    while task.wait(1) do
         if Fluent.Options.UseAllBags.Value and game.PlaceId == LOBBY_PLACEID and not bagUsageStopped then
-            -- Use bag ID 133
-            pcall(function()
-                PossessionRemote:FireServer("UseItem_Ten", 133)
-            end)
-            task.wait(0.1)
             
-            -- Use bag ID 128
-            pcall(function()
-                PossessionRemote:FireServer("UseItem_Ten", 128)
-            end)
+            -- Phase 1: Initial scanning (only if we don't have 2 working bags yet)
+            if #activeBagIds < 2 and not bagCheckInProgress and not scanningComplete then
+                bagCheckInProgress = true
+                bagStatus:SetDesc("🔍 Scanning priority bags...")
+                
+                -- Scan priority IDs (1 second each)
+                for _, id in ipairs(PRIORITY_BAG_IDS) do
+                    if #activeBagIds >= 2 then break end
+                    if not table.find(activeBagIds, id) then
+                        currentTestingBagId = id
+                        pcall(function() 
+                            PossessionRemote:FireServer("UseItem_Ten", id) 
+                        end)
+                        bagStatus:SetDesc("🔍 Testing bag ID: " .. id)
+                        task.wait(1) -- Wait 1 second before next scan
+                    end
+                end
+                
+                bagCheckInProgress = false
+                scanningComplete = true
+                
+                if #activeBagIds == 0 then
+                    bagUsageStopped = true
+                    bagStatus:SetDesc("⚠️ No working bags found")
+                elseif #activeBagIds == 1 then
+                    bagStatus:SetDesc("⚠️ Only found 1 working bag: " .. activeBagIds[1])
+                else
+                    bagStatus:SetDesc("✅ Found " .. #activeBagIds .. " working bags!")
+                end
+            end
             
-            bagStatus:SetDesc("✅ Using bags... (Last: " .. os.date("%H:%M:%S") .. ")")
         else
             if bagUsageStopped then
-                bagStatus:SetDesc("⚠️ Bags depleted - Stopped")
+                bagStatus:SetDesc("⚠️ No bags available")
             elseif Fluent.Options.UseAllBags.Value then
                 bagStatus:SetDesc("⚠️ Not in lobby")
             else
                 bagStatus:SetDesc("Disabled")
             end
+        end
+    end
+end)
+
+-- Separate loop: Use working bags every 4 seconds
+task.spawn(function()
+    while task.wait(4) do
+        if Fluent.Options.UseAllBags.Value and game.PlaceId == LOBBY_PLACEID and #activeBagIds > 0 and not bagUsageStopped then
+            -- Use all working bags
+            for _, bagId in ipairs(activeBagIds) do
+                pcall(function()
+                    PossessionRemote:FireServer("UseItem_Ten", bagId)
+                end)
+                task.wait(0.1) -- Small delay between bags
+            end
+            
+            local bagList = table.concat(activeBagIds, ", ")
+            bagStatus:SetDesc("✅ Using bags: " .. bagList .. " (" .. os.date("%H:%M:%S") .. ")")
+        end
+    end
+end)
+
+-- NEW: Auto Buy Ticket System
+task.spawn(function()
+    while task.wait(2) do
+        if Fluent.Options.AutoBuyTicket.Value and game.PlaceId == LOBBY_PLACEID and ChristmasShopRemote and not noCurrency then
+            -- Reset detection flag
+            ticketBuyDetected = false
+            
+            -- Fire buy remote
+            pcall(function()
+                ChristmasShopRemote:FireServer("BuyItem", "Winter Town Ticket")
+            end)
+            
+            ticketStatus:SetDesc("🛒 Buying ticket... (" .. os.date("%H:%M:%S") .. ")")
+            
+            -- Wait to check if Prompt was received
+            task.wait(1)
+            
+            -- If no prompt detected after 1 second, means no currency
+            if not ticketBuyDetected then
+                noCurrency = true
+                ticketStatus:SetDesc("❌ No Currency!")
+            end
+            
+        elseif not Fluent.Options.AutoBuyTicket.Value then
+            ticketStatus:SetDesc("Disabled")
+            noCurrency = false
+            ticketBuyDetected = false
+        elseif Fluent.Options.AutoBuyTicket.Value and noCurrency then
+            ticketStatus:SetDesc("❌ No Currency!")
+        elseif Fluent.Options.AutoBuyTicket.Value and game.PlaceId ~= LOBBY_PLACEID then
+            ticketStatus:SetDesc("⚠️ Not in lobby")
         end
     end
 end)
@@ -516,7 +730,7 @@ task.spawn(function()
                             Fluent.Options.JoinEventNoItem.Value
         
         if allTogglesOn or Fluent.Options.AutoJoinInfinite.Value then
-            local currentTime = os.date("*t") -- Get time table
+            local currentTime = os.date("*t")
             local hour = currentTime.hour
             local min = currentTime.min
             local sec = currentTime.sec
@@ -524,13 +738,11 @@ task.spawn(function()
             
             timeStatus:SetDesc(string.format("Current: %02d:%02d:%02d | Target: %s", hour, min, sec, targetWindow))
             
-            -- Check if we're in danger zone (minutes 00 to 05)
             if min >= 0 and min <= 5 and game.PlaceId ~= LOBBY_PLACEID then
                 local Result = pGui:FindFirstChild("Upboard") and pGui.Upboard:FindFirstChild("Result")
                 if Result and Result.Visible then
                     timeStatus:SetDesc(string.format("🚨 RETURNING TO LOBBY! (%02d:%02d)", hour, min))
                     
-                    -- Fire ReturnToLobby remote for 1 second
                     local fireStart = tick()
                     while tick() - fireStart < 1 do
                         pcall(function()
@@ -539,7 +751,7 @@ task.spawn(function()
                         task.wait(0.1)
                     end
                     
-                    task.wait(2) -- Wait for lobby transition
+                    task.wait(2)
                 end
             end
         else
@@ -548,11 +760,7 @@ task.spawn(function()
     end
 end)
 
--- Auto Join Challenge & Infinite Mode
-local ROOMS = {"Hourly_01_01", "Hourly_01_02", "Hourly_02_01", "Hourly_02_02", "Hourly_03_01", "Hourly_03_02"}
-local TP_POS = Vector3.new(78.55, 4.08, -217.50)
-local XMAS_POS = Vector3.new(-81.45, 3.94, -22.50)
-local INFINITE_POS = Vector3.new(-177.96, 30.14, 41.08)
+-- Auto Join Challenge & Infinite Mode & Winter Ticket
 
 local function pressE(dur)
     local t = tick()
@@ -567,15 +775,89 @@ end
 local function findRoom(item)
     local doors = workspace:FindFirstChild("Doors")
     if not doors then return end
+    
     local challenge = doors:FindFirstChild("Challenge")
     if not challenge then return end
-    for _, room in ipairs(ROOMS) do
-        local r = challenge:FindFirstChild(room)
-        if r then
-            local holder = r:FindFirstChild("MatchDisplayPart") and r.MatchDisplayPart:FindFirstChild("SurfaceGui") and r.MatchDisplayPart.SurfaceGui:FindFirstChild("MatchDisplayFrame") and r.MatchDisplayPart.SurfaceGui.MatchDisplayFrame:FindFirstChild("ChallengeRewards") and r.MatchDisplayPart.SurfaceGui.MatchDisplayFrame.ChallengeRewards:FindFirstChild("Holder")
-            if holder and holder:FindFirstChild(item) then return room end
+    
+    for _, roomName in ipairs(CHALLENGE_ROOMS) do
+        local room = challenge:FindFirstChild(roomName)
+        
+        if room then
+            local matchDisplay = room:FindFirstChild("MatchDisplayPart")
+            if matchDisplay then
+                local surfaceGui = matchDisplay:FindFirstChild("SurfaceGui")
+                if surfaceGui then
+                    local frame = surfaceGui:FindFirstChild("MatchDisplayFrame")
+                    if frame then
+                        local rewards = frame:FindFirstChild("ChallengeRewards")
+                        if rewards then
+                            local holder = rewards:FindFirstChild("Holder")
+                            if holder and holder:FindFirstChild(item) then
+                                return roomName
+                            end
+                        end
+                    end
+                end
+            end
         end
     end
+end
+
+-- NEW: Winter Ticket Function (Optimized)
+local function tryWinterTicket()
+    if not Fluent.Options.UseWinterTicket.Value then return false end
+    
+    winterTicketStatus:SetDesc("🎫 Scanning for winter tickets (100-110)...")
+    
+    for _, ticketId in ipairs(TICKET_IDS) do
+        pcall(function()
+            PossessionRemote:FireServer("UseItem", ticketId)
+        end)
+        
+        task.wait(0.3)
+        
+        -- Check for success by looking for Winter Event UI
+        local checkStart = tick()
+        while tick() - checkStart < 1.5 do
+            local lobbyRel = pGui:FindFirstChild("LobbyRelatives")
+            if lobbyRel then
+                local winterUI = lobbyRel:FindFirstChild("WinterEvent")
+                if winterUI then
+                    local mainFrame = winterUI:FindFirstChild("MainFrame")
+                    if mainFrame then
+                        local contents = mainFrame:FindFirstChild("Contents")
+                        if contents then
+                            local buttons = contents:FindFirstChild("Buttons")
+                            if buttons then
+                                local createBtn = buttons:FindFirstChild("Create")
+                                if createBtn and createBtn.Visible then
+                                    winterTicketStatus:SetDesc("✅ Winter ticket " .. ticketId .. " activated!")
+                                    
+                                    task.wait(1)
+                                    
+                                    -- Fire Play remote
+                                    local t = tick()
+                                    while tick() - t < 0.5 do
+                                        pcall(function()
+                                            DoorsRemote:FireServer("Play", "Custom")
+                                        end)
+                                        task.wait(0.05)
+                                    end
+                                    
+                                    winterTicketStatus:SetDesc("✅ Joined Winter Event with ticket!")
+                                    return true
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+            task.wait(0.1)
+        end
+    end
+    
+    winterTicketStatus:SetDesc("❌ No winter tickets found (100-110)")
+    return false
 end
 
 task.spawn(function()
@@ -616,12 +898,14 @@ task.spawn(function()
                     challengeAttempts = challengeAttempts + 1
                     challengeStatus:SetDesc(string.format("Not found (Attempt %d/3)", challengeAttempts))
                     
-                    -- After 3 failed attempts, use priority system
+                    -- NEW: After 3 failed attempts, use priority system with Winter Ticket
                     if challengeAttempts >= 3 then
                         challengeAttempts = 0
                         
                         local function tryMode(modeName)
-                            if modeName == "Infinite Mode" and Fluent.Options.AutoJoinInfinite.Value and LimitlessRemote then
+                            if modeName == "Winter Ticket" then
+                                return tryWinterTicket()
+                            elseif modeName == "Infinite Mode" and Fluent.Options.AutoJoinInfinite.Value and LimitlessRemote then
                                 isInInfiniteMode = true
                                 infiniteStatus:SetDesc("3 attempts failed. Joining Infinite...")
                                 
@@ -709,24 +993,36 @@ task.spawn(function()
     end
 end)
 
--- UI Loop
+-- UI Loop (Optimized)
 task.spawn(function()
     while task.wait(0.5) do
+        -- Update awakening status
         statusPara:SetDesc("Wave: " .. currentWaveNum .. " | Ready: " .. (aggressiveSpam and "YES" or "NO"))
+        
+        -- Update collection stats
         if not candyCapacityReached then
             dataPara:SetDesc("Gifts: " .. giftCount .. " | Candy: " .. candyCount)
         end
-        if not JoinChallenge.Value then
+        
+        -- Update challenge status
+        local joinChallengeActive = JoinChallenge.Value
+        if not joinChallengeActive then
             challengeStatus:SetDesc("Auto Join OFF")
             eventStatus:SetDesc("Waiting...")
+            winterTicketStatus:SetDesc("Waiting...")
         elseif not DoorsRemote then
             challengeStatus:SetDesc("Not in lobby")
         end
-        local url = Fluent.Options.WebhookURL.Value
-        if Fluent.Options.EnableWebhook.Value then
-            webhookStatus:SetDesc((url and url ~= "") and "🟢 Active" or "⚠️ No URL set")
+        
+        -- Update webhook status
+        local webhookEnabled = Fluent.Options.EnableWebhook.Value
+        local webhookURL = Fluent.Options.WebhookURL.Value
+        local hasURL = webhookURL and webhookURL ~= ""
+        
+        if webhookEnabled then
+            webhookStatus:SetDesc(hasURL and "🟢 Active" or "⚠️ No URL set")
         else
-            webhookStatus:SetDesc((url and url ~= "") and "⚪ Configured but OFF" or "⚪ Not configured")
+            webhookStatus:SetDesc(hasURL and "⚪ Configured but OFF" or "⚪ Not configured")
         end
     end
 end)
