@@ -689,7 +689,7 @@ end)
 
 -- NEW: Auto Buy Ticket System
 task.spawn(function()
-    while task.wait(2) do
+    while task.wait(1) do
         if Fluent.Options.AutoBuyTicket.Value and game.PlaceId == LOBBY_PLACEID and ChristmasShopRemote and not noCurrency then
             -- Reset detection flag
             ticketBuyDetected = false
