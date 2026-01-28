@@ -32,6 +32,7 @@ local DoorsRemote = LobbyRelatives and LobbyRelatives:FindFirstChild("Doors")
 local ChristmasMapRemote = LobbyRelatives and LobbyRelatives:FindFirstChild("ChristmasMap")
 local LimitlessRemote = LobbyRelatives and LobbyRelatives:FindFirstChild("Limitless")
 local ChristmasShopRemote = LobbyRelatives and LobbyRelatives:FindFirstChild("ChristmasShop")
+local InventoryRemote = Remotes:FindFirstChild("Inventory")
 
 -- State
 local aggressiveSpam = false
@@ -62,6 +63,7 @@ local scanningComplete = false
 -- NEW: Ticket buying variables
 local ticketBuyDetected = false
 local noCurrency = false
+local purchasedTicketId = nil  -- Store the ticket ID from successful purchase
 
 -- UI Window
 local Window = Fluent:CreateWindow({
@@ -120,9 +122,7 @@ local infiniteStatus = Tabs.AutoJoin:AddParagraph({Title = "Infinite Status", Co
 
 -- NEW: Winter Ticket Section
 Tabs.AutoJoin:AddSection("Winter Ticket Automation")
-Tabs.AutoJoin:AddToggle("UseWinterTicket", {Title = "Auto Join Winter Ticket If No Specific Item", Default = false})
-Tabs.AutoJoin:AddInput("WinterTicketStart", {Title = "Winter Ticket Scan Start ID", Default = "100", Numeric = true, Placeholder = "Start ID"})
-Tabs.AutoJoin:AddInput("WinterTicketEnd", {Title = "Winter Ticket Scan End ID", Default = "110", Numeric = true, Placeholder = "End ID"})
+Tabs.AutoJoin:AddToggle("UseWinterTicket", {Title = "Auto Use Purchased Winter Ticket", Default = false})
 local winterTicketStatus = Tabs.AutoJoin:AddParagraph({Title = "Winter Ticket Status", Content = "Waiting..."})
 
 Tabs.AutoJoin:AddSection("Priority System (After 3 Failed Attempts)")
@@ -454,6 +454,18 @@ end)
 -- IMPROVED: Candy capacity and Bag detection
 local currentTestingBagId = nil
 
+-- Listen for Inventory updates (detects successful ticket purchase)
+if InventoryRemote then
+    InventoryRemote.OnClientEvent:Connect(function(action, itemId, quantity)
+        if action == "UpdatePartially" and itemId then
+            -- Successfully purchased a ticket! Store its ID
+            purchasedTicketId = itemId
+            ticketBuyDetected = true
+            ticketStatus:SetDesc("✅ Ticket purchased! ID: " .. itemId .. " (Qty: " .. (quantity or 1) .. ")")
+        end
+    end)
+end
+
 NotifyRemote.OnClientEvent:Connect(function(msgType, msgContent)
     if msgType == "Error" and msgContent then
         if msgContent:find("Daily Capacity") then
@@ -483,19 +495,6 @@ NotifyRemote.OnClientEvent:Connect(function(msgType, msgContent)
                 
                 currentTestingBagId = nil
             end
-        -- Check if this is a ticket purchase
-        elseif msgContent["Winter Town Ticket"] then
-            ticketBuyDetected = true
-            noCurrency = false
-            ticketStatus:SetDesc("✅ Ticket purchased! (" .. os.date("%H:%M:%S") .. ")")
-            
-            -- Claim the ticket
-            task.spawn(function()
-                task.wait(0.1)
-                pcall(function()
-                    AwardRemote:FireServer("Prompt", msgContent)
-                end)
-            end)
         end
     end
 end)
@@ -698,27 +697,42 @@ task.spawn(function()
     end
 end)
 
--- NEW: Auto Buy Ticket System
+-- NEW: Auto Buy Ticket System (Improved with Spam Buy)
 task.spawn(function()
-    while task.wait(2) do
+    while task.wait(0.3) do
         if Fluent.Options.AutoBuyTicket.Value and game.PlaceId == LOBBY_PLACEID and ChristmasShopRemote and not noCurrency then
-            -- Reset detection flag
+            -- Reset detection flag before each attempt
             ticketBuyDetected = false
+            local attemptStartTime = tick()
             
-            -- Fire buy remote
-            pcall(function()
-                ChristmasShopRemote:FireServer("BuyItem", "Winter Town Ticket")
-            end)
+            -- Spam buy remote 3 times with small delays
+            for i = 1, 3 do
+                pcall(function()
+                    ChristmasShopRemote:FireServer("BuyItem", "Winter Town Ticket")
+                end)
+                task.wait(0.1)
+            end
             
             ticketStatus:SetDesc("🛒 Buying ticket... (" .. os.date("%H:%M:%S") .. ")")
             
-            -- Wait to check if Prompt was received
-            task.wait(1)
+            -- Wait up to 2 seconds to check if Inventory update was received
+            local waitStart = tick()
+            while tick() - waitStart < 2 do
+                if ticketBuyDetected then
+                    -- Successfully purchased!
+                    noCurrency = false
+                    break
+                end
+                task.wait(0.1)
+            end
             
-            -- If no prompt detected after 1 second, means no currency
+            -- If still no inventory update after 2 seconds, means no currency
             if not ticketBuyDetected then
                 noCurrency = true
                 ticketStatus:SetDesc("❌ No Currency!")
+            else
+                -- Reset noCurrency flag on successful purchase
+                noCurrency = false
             end
             
         elseif not Fluent.Options.AutoBuyTicket.Value then
@@ -726,7 +740,10 @@ task.spawn(function()
             noCurrency = false
             ticketBuyDetected = false
         elseif Fluent.Options.AutoBuyTicket.Value and noCurrency then
-            ticketStatus:SetDesc("❌ No Currency!")
+            ticketStatus:SetDesc("❌ No Currency! (Retrying in 5s...)")
+            task.wait(5)
+            -- Reset and try again after 5 seconds
+            noCurrency = false
         elseif Fluent.Options.AutoBuyTicket.Value and game.PlaceId ~= LOBBY_PLACEID then
             ticketStatus:SetDesc("⚠️ Not in lobby")
         end
@@ -814,97 +831,95 @@ local function findRoom(item)
     end
 end
 
--- NEW: Winter Ticket Function (User-Configurable Range for Auto Join)
+-- NEW: Winter Ticket Function (Uses Purchased Ticket ID)
 local function tryWinterTicket()
     if not Fluent.Options.UseWinterTicket.Value then return false end
     
-    -- Get user-defined scan range from Auto Join tab
-    local scanStart = tonumber(Fluent.Options.WinterTicketStart.Value) or 100
-    local scanEnd = tonumber(Fluent.Options.WinterTicketEnd.Value) or 110
+    if not purchasedTicketId then
+        winterTicketStatus:SetDesc("❌ No purchased ticket ID found! Buy ticket first.")
+        return false
+    end
     
-    winterTicketStatus:SetDesc("🎫 Scanning winter tickets " .. scanStart .. "-" .. scanEnd .. "...")
+    winterTicketStatus:SetDesc("🎫 Using purchased ticket ID: " .. purchasedTicketId)
     
-    -- Scan user-defined range
-    for ticketId = scanStart, scanEnd do
-        pcall(function()
-            PossessionRemote:FireServer("UseItem", ticketId)
-        end)
-        
-        winterTicketStatus:SetDesc("🎫 Testing ticket ID: " .. ticketId)
-        task.wait(0.5) -- Wait for response
-        
-        -- Check for success by looking for Winter Event UI
-        local checkStart = tick()
-        while tick() - checkStart < 1 do
-            local lobbyRel = pGui:FindFirstChild("LobbyRelatives")
-            if lobbyRel then
-                local winterUI = lobbyRel:FindFirstChild("WinterEvent")
-                if winterUI then
-                    local mainFrame = winterUI:FindFirstChild("MainFrame")
-                    if mainFrame then
-                        local contents = mainFrame:FindFirstChild("Contents")
-                        if contents then
-                            local buttons = contents:FindFirstChild("Buttons")
-                            if buttons then
-                                local createBtn = buttons:FindFirstChild("Create")
-                                if createBtn and createBtn.Visible then
-                                    winterTicketStatus:SetDesc("✅ Winter ticket " .. ticketId .. " activated!")
-                                    
-                                    task.wait(1)
-                                    
-                                    -- Fire Play remote to join the portal
-                                    local t = tick()
-                                    while tick() - t < 0.5 do
-                                        pcall(function()
-                                            DoorsRemote:FireServer("Play", "Custom")
-                                        end)
-                                        task.wait(0.05)
-                                    end
-                                    
-                                    winterTicketStatus:SetDesc("✅ Joined portal! Waiting for START button...")
-                                    
-                                    -- Wait for the game to load and START button to appear
-                                    task.wait(3)
-                                    
-                                    -- Look for and click START button
-                                    local startClicked = false
-                                    local startWaitTime = tick()
-                                    while tick() - startWaitTime < 10 and not startClicked do
-                                        local Upboard = pGui:FindFirstChild("Upboard")
-                                        if Upboard then
-                                            local Wave = Upboard:FindFirstChild("Wave")
-                                            if Wave then
-                                                local StartButtonHolder = Wave:FindFirstChild("StartButtonHolder")
-                                                if StartButtonHolder and StartButtonHolder.Visible then
-                                                    -- Click START button via remote
-                                                    pcall(function()
-                                                        UpboardRemote:FireServer("Start")
-                                                    end)
-                                                    winterTicketStatus:SetDesc("✅ START button clicked!")
-                                                    startClicked = true
-                                                    break
-                                                end
+    -- Use the purchased ticket
+    pcall(function()
+        PossessionRemote:FireServer("UseItem", purchasedTicketId)
+    end)
+    
+    task.wait(0.5)
+    
+    -- Check for success by looking for Winter Event UI
+    local checkStart = tick()
+    while tick() - checkStart < 2 do
+        local lobbyRel = pGui:FindFirstChild("LobbyRelatives")
+        if lobbyRel then
+            local winterUI = lobbyRel:FindFirstChild("WinterEvent")
+            if winterUI then
+                local mainFrame = winterUI:FindFirstChild("MainFrame")
+                if mainFrame then
+                    local contents = mainFrame:FindFirstChild("Contents")
+                    if contents then
+                        local buttons = contents:FindFirstChild("Buttons")
+                        if buttons then
+                            local createBtn = buttons:FindFirstChild("Create")
+                            if createBtn and createBtn.Visible then
+                                winterTicketStatus:SetDesc("✅ Winter ticket " .. purchasedTicketId .. " activated!")
+                                
+                                task.wait(1)
+                                
+                                -- Fire Play remote to join the portal
+                                local t = tick()
+                                while tick() - t < 0.5 do
+                                    pcall(function()
+                                        DoorsRemote:FireServer("Play", "Custom")
+                                    end)
+                                    task.wait(0.05)
+                                end
+                                
+                                winterTicketStatus:SetDesc("✅ Joined portal! Waiting for START button...")
+                                
+                                -- Wait for the game to load and START button to appear
+                                task.wait(3)
+                                
+                                -- Look for and click START button
+                                local startClicked = false
+                                local startWaitTime = tick()
+                                while tick() - startWaitTime < 10 and not startClicked do
+                                    local Upboard = pGui:FindFirstChild("Upboard")
+                                    if Upboard then
+                                        local Wave = Upboard:FindFirstChild("Wave")
+                                        if Wave then
+                                            local StartButtonHolder = Wave:FindFirstChild("StartButtonHolder")
+                                            if StartButtonHolder and StartButtonHolder.Visible then
+                                                -- Click START button via remote
+                                                pcall(function()
+                                                    UpboardRemote:FireServer("Start")
+                                                end)
+                                                winterTicketStatus:SetDesc("✅ START button clicked!")
+                                                startClicked = true
+                                                break
                                             end
                                         end
-                                        task.wait(0.5)
                                     end
-                                    
-                                    if not startClicked then
-                                        winterTicketStatus:SetDesc("⚠️ START button not found, continuing anyway")
-                                    end
-                                    
-                                    return true
+                                    task.wait(0.5)
                                 end
+                                
+                                if not startClicked then
+                                    winterTicketStatus:SetDesc("⚠️ START button not found, continuing anyway")
+                                end
+                                
+                                return true
                             end
                         end
                     end
                 end
             end
-            task.wait(0.1)
         end
+        task.wait(0.1)
     end
     
-    winterTicketStatus:SetDesc("❌ No winter tickets found (" .. scanStart .. "-" .. scanEnd .. ")")
+    winterTicketStatus:SetDesc("❌ Failed to use ticket ID: " .. purchasedTicketId)
     return false
 end
 
