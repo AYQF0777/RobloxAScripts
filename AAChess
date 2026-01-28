@@ -852,7 +852,7 @@ local function tryWinterTicket()
                                     
                                     task.wait(1)
                                     
-                                    -- Fire Play remote
+                                    -- Fire Play remote to join the portal
                                     local t = tick()
                                     while tick() - t < 0.5 do
                                         pcall(function()
@@ -861,7 +861,38 @@ local function tryWinterTicket()
                                         task.wait(0.05)
                                     end
                                     
-                                    winterTicketStatus:SetDesc("✅ Joined Winter Event with ticket!")
+                                    winterTicketStatus:SetDesc("✅ Joined portal! Waiting for START button...")
+                                    
+                                    -- Wait for the game to load and START button to appear
+                                    task.wait(3)
+                                    
+                                    -- Look for and click START button
+                                    local startClicked = false
+                                    local startWaitTime = tick()
+                                    while tick() - startWaitTime < 10 and not startClicked do
+                                        local Upboard = pGui:FindFirstChild("Upboard")
+                                        if Upboard then
+                                            local Wave = Upboard:FindFirstChild("Wave")
+                                            if Wave then
+                                                local StartButtonHolder = Wave:FindFirstChild("StartButtonHolder")
+                                                if StartButtonHolder and StartButtonHolder.Visible then
+                                                    -- Click START button via remote
+                                                    pcall(function()
+                                                        UpboardRemote:FireServer("Start")
+                                                    end)
+                                                    winterTicketStatus:SetDesc("✅ START button clicked!")
+                                                    startClicked = true
+                                                    break
+                                                end
+                                            end
+                                        end
+                                        task.wait(0.5)
+                                    end
+                                    
+                                    if not startClicked then
+                                        winterTicketStatus:SetDesc("⚠️ START button not found, continuing anyway")
+                                    end
+                                    
                                     return true
                                 end
                             end
@@ -1016,12 +1047,32 @@ task.spawn(function()
                         
                         -- If any priority succeeded, wait longer before next challenge attempt
                         if prioritySuccess then
-                            challengeStatus:SetDesc("Priority mode joined successfully!")
+                            challengeStatus:SetDesc("✅ Priority mode joined! Match starting...")
+                            
+                            -- Wait for match to actually start (player leaves lobby)
+                            local waitStart = tick()
+                            while game.PlaceId == LOBBY_PLACEID and tick() - waitStart < 30 do
+                                task.wait(1)
+                            end
+                            
+                            if game.PlaceId ~= LOBBY_PLACEID then
+                                challengeStatus:SetDesc("🎮 In match... waiting for completion")
+                                
+                                -- Wait until player returns to lobby (match finished)
+                                while game.PlaceId ~= LOBBY_PLACEID do
+                                    task.wait(2)
+                                end
+                                
+                                challengeStatus:SetDesc("✅ Match completed! Returned to lobby")
+                            else
+                                challengeStatus:SetDesc("⚠️ Still in lobby after 30s")
+                            end
+                            
                             challengeRunning = false
-                            task.wait(10) -- Wait 10 seconds before allowing next challenge attempt
+                            task.wait(5) -- Extra 5 seconds before allowing next challenge attempt
                             continue
                         else
-                            challengeStatus:SetDesc("All priority modes failed")
+                            challengeStatus:SetDesc("❌ All priority modes failed")
                         end
                     end
                 end
