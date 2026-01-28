@@ -64,6 +64,7 @@ local scanningComplete = false
 local ticketBuyDetected = false
 local noCurrency = false
 local purchasedTicketId = nil  -- Store the ticket ID from successful purchase
+local currentTicketAmount = 0  -- Track current ticket quantity
 
 -- UI Window
 local Window = Fluent:CreateWindow({
@@ -162,12 +163,11 @@ local afkStatus = Tabs.Dodge:AddParagraph({Title = "AFK Status", Content = "Anti
 -- Items Tab
 Tabs.Items:AddSection("Bag Opener")
 Tabs.Items:AddToggle("UseAllBags", {Title = "Use All Bags", Default = false})
-Tabs.Items:AddInput("BagScanStart", {Title = "Bag Scan Start ID", Default = "120", Numeric = true, Placeholder = "Start ID"})
-Tabs.Items:AddInput("BagScanEnd", {Title = "Bag Scan End ID", Default = "150", Numeric = true, Placeholder = "End ID"})
 local bagStatus = Tabs.Items:AddParagraph({Title = "Bag Status", Content = "Disabled"})
 
 Tabs.Items:AddSection("Ticket Buyer (Buy with Currency)")
 Tabs.Items:AddToggle("AutoBuyTicket", {Title = "Auto Buy Ticket", Default = false})
+Tabs.Items:AddInput("MaxTicketAmount", {Title = "Max Ticket Amount", Default = "25", Numeric = true, Placeholder = "Max tickets"})
 local ticketStatus = Tabs.Items:AddParagraph({Title = "Ticket Status", Content = "Disabled"})
 
 -- Webhook Tab
@@ -454,14 +454,30 @@ end)
 -- IMPROVED: Candy capacity and Bag detection
 local currentTestingBagId = nil
 
--- Listen for Inventory updates (detects successful ticket purchase)
+-- Listen for Inventory updates (detects successful purchases/bag usage)
 if InventoryRemote then
     InventoryRemote.OnClientEvent:Connect(function(action, itemId, quantity)
-        if action == "UpdatePartially" and itemId then
-            -- Successfully purchased a ticket! Store its ID
-            purchasedTicketId = itemId
-            ticketBuyDetected = true
-            ticketStatus:SetDesc("✅ Ticket purchased! ID: " .. itemId .. " (Qty: " .. (quantity or 1) .. ")")
+        if action == "UpdatePartially" and itemId and quantity then
+            -- Check if this is a ticket (has purchasedTicketId or matches winter ticket pattern)
+            if purchasedTicketId == itemId or (itemId >= 100 and itemId <= 200 and quantity >= 1) then
+                purchasedTicketId = itemId
+                currentTicketAmount = quantity
+                ticketBuyDetected = true
+                
+                local maxTickets = tonumber(Fluent.Options.MaxTicketAmount.Value) or 25
+                if currentTicketAmount >= maxTickets then
+                    ticketStatus:SetDesc("✅ MAX REACHED! ID: " .. itemId .. " (Qty: " .. quantity .. "/" .. maxTickets .. ")")
+                else
+                    ticketStatus:SetDesc("✅ Ticket bought! ID: " .. itemId .. " (Qty: " .. quantity .. "/" .. maxTickets .. ")")
+                end
+            -- Check if this is a bag (likely different ID range)
+            elseif itemId >= 100 and itemId <= 200 and quantity >= 1 then
+                -- This might be a bag, add it to activeBagIds if not already there
+                if not table.find(activeBagIds, itemId) and #activeBagIds < 2 then
+                    table.insert(activeBagIds, itemId)
+                    bagStatus:SetDesc("✅ Found bag ID: " .. itemId .. " (Qty: " .. quantity .. ") - Total: " .. #activeBagIds)
+                end
+            end
         end
     end)
 end
@@ -622,68 +638,15 @@ task.spawn(function()
     end
 end)
 
--- IMPROVED: Use All Bags (Items Tab) - User-Configurable Range Scan
-task.spawn(function()
-    while task.wait(1) do
-        if Fluent.Options.UseAllBags.Value and game.PlaceId == LOBBY_PLACEID and not bagUsageStopped then
-            
-            -- Phase 1: Initial scanning (only if we don't have 2 working bags yet)
-            if #activeBagIds < 2 and not bagCheckInProgress and not scanningComplete then
-                bagCheckInProgress = true
-                
-                -- Get user-defined scan range
-                local scanStart = tonumber(Fluent.Options.BagScanStart.Value) or 120
-                local scanEnd = tonumber(Fluent.Options.BagScanEnd.Value) or 150
-                
-                bagStatus:SetDesc("🔍 Scanning bags " .. scanStart .. "-" .. scanEnd .. "...")
-                
-                -- Scan user-defined range (1 second delay each to prevent crash)
-                for id = scanStart, scanEnd do
-                    if #activeBagIds >= 2 then 
-                        bagStatus:SetDesc("✅ Found 2 working bags!")
-                        break 
-                    end
-                    
-                    if not table.find(activeBagIds, id) then
-                        currentTestingBagId = id
-                        pcall(function() 
-                            PossessionRemote:FireServer("UseItem_Ten", id) 
-                        end)
-                        bagStatus:SetDesc("🔍 Testing bag ID: " .. id .. " (" .. #activeBagIds .. "/2 found)")
-                        task.wait(1) -- CRITICAL: 1 second delay to prevent game crash
-                    end
-                end
-                
-                bagCheckInProgress = false
-                scanningComplete = true
-                
-                if #activeBagIds == 0 then
-                    bagUsageStopped = true
-                    bagStatus:SetDesc("⚠️ No working bags found (" .. scanStart .. "-" .. scanEnd .. ")")
-                elseif #activeBagIds == 1 then
-                    bagStatus:SetDesc("⚠️ Only found 1 working bag: " .. activeBagIds[1])
-                else
-                    bagStatus:SetDesc("✅ Found " .. #activeBagIds .. " working bags!")
-                end
-            end
-            
-        else
-            if bagUsageStopped then
-                bagStatus:SetDesc("⚠️ No bags available")
-            elseif Fluent.Options.UseAllBags.Value then
-                bagStatus:SetDesc("⚠️ Not in lobby")
-            else
-                bagStatus:SetDesc("Disabled")
-            end
-        end
-    end
-end)
+-- IMPROVED: Use All Bags (No Scanning Needed - Uses Inventory IDs)
+-- Bags are automatically detected via Inventory UpdatePartially events
+-- Just use the bags we've detected every 4 seconds
 
--- Separate loop: Use working bags every 4 seconds
+-- Separate loop: Use detected bags every 4 seconds
 task.spawn(function()
     while task.wait(4) do
-        if Fluent.Options.UseAllBags.Value and game.PlaceId == LOBBY_PLACEID and #activeBagIds > 0 and not bagUsageStopped then
-            -- Use all working bags
+        if Fluent.Options.UseAllBags.Value and game.PlaceId == LOBBY_PLACEID and #activeBagIds > 0 then
+            -- Use all detected bags
             for _, bagId in ipairs(activeBagIds) do
                 pcall(function()
                     PossessionRemote:FireServer("UseItem_Ten", bagId)
@@ -693,17 +656,31 @@ task.spawn(function()
             
             local bagList = table.concat(activeBagIds, ", ")
             bagStatus:SetDesc("✅ Using bags: " .. bagList .. " (" .. os.date("%H:%M:%S") .. ")")
+        elseif Fluent.Options.UseAllBags.Value and game.PlaceId == LOBBY_PLACEID and #activeBagIds == 0 then
+            bagStatus:SetDesc("⚠️ No bag IDs detected yet. Use bags manually first!")
+        elseif Fluent.Options.UseAllBags.Value and game.PlaceId ~= LOBBY_PLACEID then
+            bagStatus:SetDesc("⚠️ Not in lobby")
+        else
+            bagStatus:SetDesc("Disabled")
         end
     end
 end)
 
--- NEW: Auto Buy Ticket System (Improved with Spam Buy)
+-- NEW: Auto Buy Ticket System (Improved with Max Amount Check)
 task.spawn(function()
     while task.wait(0.3) do
+        local maxTickets = tonumber(Fluent.Options.MaxTicketAmount.Value) or 25
+        
         if Fluent.Options.AutoBuyTicket.Value and game.PlaceId == LOBBY_PLACEID and ChristmasShopRemote and not noCurrency then
+            -- Check if we've reached max tickets
+            if currentTicketAmount >= maxTickets then
+                ticketStatus:SetDesc("✅ MAX REACHED! " .. currentTicketAmount .. "/" .. maxTickets .. " tickets")
+                task.wait(2) -- Wait before checking again
+                continue
+            end
+            
             -- Reset detection flag before each attempt
             ticketBuyDetected = false
-            local attemptStartTime = tick()
             
             -- Spam buy remote 3 times with small delays
             for i = 1, 3 do
@@ -713,7 +690,7 @@ task.spawn(function()
                 task.wait(0.1)
             end
             
-            ticketStatus:SetDesc("🛒 Buying ticket... (" .. os.date("%H:%M:%S") .. ")")
+            ticketStatus:SetDesc("🛒 Buying... (" .. currentTicketAmount .. "/" .. maxTickets .. ") " .. os.date("%H:%M:%S"))
             
             -- Wait up to 2 seconds to check if Inventory update was received
             local waitStart = tick()
