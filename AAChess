@@ -49,9 +49,7 @@ local bagUsageStopped = false
 
 -- Constants
 local LOBBY_PLACEID = 16695366828
-local PRIORITY_BAG_IDS = {132, 141, 133, 128}
 local CHALLENGE_ROOMS = {"Hourly_01_01", "Hourly_01_02", "Hourly_02_01", "Hourly_02_02", "Hourly_03_01", "Hourly_03_02"}
-local TICKET_IDS = {105, 100, 101, 102, 103, 104, 106, 107, 108, 109, 110}
 local TP_POS = Vector3.new(78.55, 4.08, -217.50)
 local XMAS_POS = Vector3.new(-81.45, 3.94, -22.50)
 local INFINITE_POS = Vector3.new(-177.96, 30.14, 41.08)
@@ -123,6 +121,8 @@ local infiniteStatus = Tabs.AutoJoin:AddParagraph({Title = "Infinite Status", Co
 -- NEW: Winter Ticket Section
 Tabs.AutoJoin:AddSection("Winter Ticket Automation")
 Tabs.AutoJoin:AddToggle("UseWinterTicket", {Title = "Auto Join Winter Ticket If No Specific Item", Default = false})
+Tabs.AutoJoin:AddInput("WinterTicketStart", {Title = "Winter Ticket Scan Start ID", Default = "100", Numeric = true, Placeholder = "Start ID"})
+Tabs.AutoJoin:AddInput("WinterTicketEnd", {Title = "Winter Ticket Scan End ID", Default = "110", Numeric = true, Placeholder = "End ID"})
 local winterTicketStatus = Tabs.AutoJoin:AddParagraph({Title = "Winter Ticket Status", Content = "Waiting..."})
 
 Tabs.AutoJoin:AddSection("Priority System (After 3 Failed Attempts)")
@@ -162,9 +162,11 @@ local afkStatus = Tabs.Dodge:AddParagraph({Title = "AFK Status", Content = "Anti
 -- Items Tab
 Tabs.Items:AddSection("Bag Opener")
 Tabs.Items:AddToggle("UseAllBags", {Title = "Use All Bags", Default = false})
+Tabs.Items:AddInput("BagScanStart", {Title = "Bag Scan Start ID", Default = "120", Numeric = true, Placeholder = "Start ID"})
+Tabs.Items:AddInput("BagScanEnd", {Title = "Bag Scan End ID", Default = "150", Numeric = true, Placeholder = "End ID"})
 local bagStatus = Tabs.Items:AddParagraph({Title = "Bag Status", Content = "Disabled"})
 
-Tabs.Items:AddSection("Ticket Buyer")
+Tabs.Items:AddSection("Ticket Buyer (Buy with Currency)")
 Tabs.Items:AddToggle("AutoBuyTicket", {Title = "Auto Buy Ticket", Default = false})
 local ticketStatus = Tabs.Items:AddParagraph({Title = "Ticket Status", Content = "Disabled"})
 
@@ -621,7 +623,7 @@ task.spawn(function()
     end
 end)
 
--- IMPROVED: Use All Bags (Items Tab) - Priority Scan Only
+-- IMPROVED: Use All Bags (Items Tab) - User-Configurable Range Scan
 task.spawn(function()
     while task.wait(1) do
         if Fluent.Options.UseAllBags.Value and game.PlaceId == LOBBY_PLACEID and not bagUsageStopped then
@@ -629,18 +631,27 @@ task.spawn(function()
             -- Phase 1: Initial scanning (only if we don't have 2 working bags yet)
             if #activeBagIds < 2 and not bagCheckInProgress and not scanningComplete then
                 bagCheckInProgress = true
-                bagStatus:SetDesc("🔍 Scanning priority bags...")
                 
-                -- Scan priority IDs (1 second each)
-                for _, id in ipairs(PRIORITY_BAG_IDS) do
-                    if #activeBagIds >= 2 then break end
+                -- Get user-defined scan range
+                local scanStart = tonumber(Fluent.Options.BagScanStart.Value) or 120
+                local scanEnd = tonumber(Fluent.Options.BagScanEnd.Value) or 150
+                
+                bagStatus:SetDesc("🔍 Scanning bags " .. scanStart .. "-" .. scanEnd .. "...")
+                
+                -- Scan user-defined range (1 second delay each to prevent crash)
+                for id = scanStart, scanEnd do
+                    if #activeBagIds >= 2 then 
+                        bagStatus:SetDesc("✅ Found 2 working bags!")
+                        break 
+                    end
+                    
                     if not table.find(activeBagIds, id) then
                         currentTestingBagId = id
                         pcall(function() 
                             PossessionRemote:FireServer("UseItem_Ten", id) 
                         end)
-                        bagStatus:SetDesc("🔍 Testing bag ID: " .. id)
-                        task.wait(1) -- Wait 1 second before next scan
+                        bagStatus:SetDesc("🔍 Testing bag ID: " .. id .. " (" .. #activeBagIds .. "/2 found)")
+                        task.wait(1) -- CRITICAL: 1 second delay to prevent game crash
                     end
                 end
                 
@@ -649,7 +660,7 @@ task.spawn(function()
                 
                 if #activeBagIds == 0 then
                     bagUsageStopped = true
-                    bagStatus:SetDesc("⚠️ No working bags found")
+                    bagStatus:SetDesc("⚠️ No working bags found (" .. scanStart .. "-" .. scanEnd .. ")")
                 elseif #activeBagIds == 1 then
                     bagStatus:SetDesc("⚠️ Only found 1 working bag: " .. activeBagIds[1])
                 else
@@ -689,7 +700,7 @@ end)
 
 -- NEW: Auto Buy Ticket System
 task.spawn(function()
-    while task.wait(1) do
+    while task.wait(2) do
         if Fluent.Options.AutoBuyTicket.Value and game.PlaceId == LOBBY_PLACEID and ChristmasShopRemote and not noCurrency then
             -- Reset detection flag
             ticketBuyDetected = false
@@ -803,22 +814,28 @@ local function findRoom(item)
     end
 end
 
--- NEW: Winter Ticket Function (Optimized)
+-- NEW: Winter Ticket Function (User-Configurable Range for Auto Join)
 local function tryWinterTicket()
     if not Fluent.Options.UseWinterTicket.Value then return false end
     
-    winterTicketStatus:SetDesc("🎫 Scanning for winter tickets (100-110)...")
+    -- Get user-defined scan range from Auto Join tab
+    local scanStart = tonumber(Fluent.Options.WinterTicketStart.Value) or 100
+    local scanEnd = tonumber(Fluent.Options.WinterTicketEnd.Value) or 110
     
-    for _, ticketId in ipairs(TICKET_IDS) do
+    winterTicketStatus:SetDesc("🎫 Scanning winter tickets " .. scanStart .. "-" .. scanEnd .. "...")
+    
+    -- Scan user-defined range
+    for ticketId = scanStart, scanEnd do
         pcall(function()
             PossessionRemote:FireServer("UseItem", ticketId)
         end)
         
-        task.wait(0.3)
+        winterTicketStatus:SetDesc("🎫 Testing ticket ID: " .. ticketId)
+        task.wait(0.5) -- Wait for response
         
         -- Check for success by looking for Winter Event UI
         local checkStart = tick()
-        while tick() - checkStart < 1.5 do
+        while tick() - checkStart < 1 do
             local lobbyRel = pGui:FindFirstChild("LobbyRelatives")
             if lobbyRel then
                 local winterUI = lobbyRel:FindFirstChild("WinterEvent")
@@ -856,7 +873,7 @@ local function tryWinterTicket()
         end
     end
     
-    winterTicketStatus:SetDesc("❌ No winter tickets found (100-110)")
+    winterTicketStatus:SetDesc("❌ No winter tickets found (" .. scanStart .. "-" .. scanEnd .. ")")
     return false
 end
 
@@ -892,6 +909,9 @@ task.spawn(function()
                                 task.wait(0.05)
                             end
                             challengeStatus:SetDesc("Joined!")
+                            challengeRunning = false
+                            task.wait(5)
+                            continue
                         end
                     end
                 else
@@ -901,13 +921,14 @@ task.spawn(function()
                     -- NEW: After 3 failed attempts, use priority system with Winter Ticket
                     if challengeAttempts >= 3 then
                         challengeAttempts = 0
+                        challengeStatus:SetDesc("3 attempts failed - Trying priority modes...")
                         
                         local function tryMode(modeName)
                             if modeName == "Winter Ticket" then
                                 return tryWinterTicket()
                             elseif modeName == "Infinite Mode" and Fluent.Options.AutoJoinInfinite.Value and LimitlessRemote then
                                 isInInfiniteMode = true
-                                infiniteStatus:SetDesc("3 attempts failed. Joining Infinite...")
+                                infiniteStatus:SetDesc("Joining Infinite Mode...")
                                 
                                 task.wait(2)
                                 
@@ -953,7 +974,7 @@ task.spawn(function()
                                 end
                             elseif modeName == "Christmas Event" and Fluent.Options.JoinChristmasEvent.Value and Fluent.Options.JoinEventNoItem.Value and ChristmasMapRemote then
                                 isInChristmasEvent = true
-                                eventStatus:SetDesc("3 attempts failed. Joining Christmas...")
+                                eventStatus:SetDesc("Joining Christmas Event...")
                                 
                                 hrp.CFrame = CFrame.new(XMAS_POS)
                                 task.wait(4)
@@ -979,10 +1000,28 @@ task.spawn(function()
                         local priority2 = Fluent.Options.Priority2.Value
                         local priority3 = Fluent.Options.Priority3.Value
                         
-                        if not tryMode(priority1) then
-                            if not tryMode(priority2) then
-                                tryMode(priority3)
-                            end
+                        local prioritySuccess = false
+                        
+                        if priority1 ~= "None" then
+                            prioritySuccess = tryMode(priority1)
+                        end
+                        
+                        if not prioritySuccess and priority2 ~= "None" then
+                            prioritySuccess = tryMode(priority2)
+                        end
+                        
+                        if not prioritySuccess and priority3 ~= "None" then
+                            prioritySuccess = tryMode(priority3)
+                        end
+                        
+                        -- If any priority succeeded, wait longer before next challenge attempt
+                        if prioritySuccess then
+                            challengeStatus:SetDesc("Priority mode joined successfully!")
+                            challengeRunning = false
+                            task.wait(10) -- Wait 10 seconds before allowing next challenge attempt
+                            continue
+                        else
+                            challengeStatus:SetDesc("All priority modes failed")
                         end
                     end
                 end
