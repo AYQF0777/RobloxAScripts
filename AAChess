@@ -55,16 +55,17 @@ local TP_POS = Vector3.new(78.55, 4.08, -217.50)
 local XMAS_POS = Vector3.new(-81.45, 3.94, -22.50)
 local INFINITE_POS = Vector3.new(-177.96, 30.14, 41.08)
 
--- NEW: Bag system variables
+-- IMPROVED: Bag system variables
 local activeBagIds = {} -- Store both working bag IDs
 local bagCheckInProgress = false
 local scanningComplete = false
+local currentScanId = nil -- Track which ID we're currently testing
 
--- NEW: Ticket buying variables
+-- Ticket buying variables
 local ticketBuyDetected = false
 local noCurrency = false
-local purchasedTicketId = nil  -- Store the ticket ID from successful purchase
-local currentTicketAmount = 0  -- Track current ticket quantity
+local purchasedTicketId = nil
+local currentTicketAmount = 0
 
 -- UI Window
 local Window = Fluent:CreateWindow({
@@ -121,7 +122,7 @@ Tabs.AutoJoin:AddSection("Auto Join Infinite")
 Tabs.AutoJoin:AddToggle("AutoJoinInfinite", {Title = "Auto Join Infinite if No Item", Default = false})
 local infiniteStatus = Tabs.AutoJoin:AddParagraph({Title = "Infinite Status", Content = "Waiting..."})
 
--- NEW: Winter Ticket Section
+-- Winter Ticket Section
 Tabs.AutoJoin:AddSection("Winter Ticket Automation")
 Tabs.AutoJoin:AddToggle("UseWinterTicket", {Title = "Auto Use Purchased Winter Ticket", Default = false})
 local winterTicketStatus = Tabs.AutoJoin:AddParagraph({Title = "Winter Ticket Status", Content = "Waiting..."})
@@ -231,7 +232,7 @@ local DEV_IMAGE_PATTERNS = {"hammer", "admin", "developer"}
 
 local function checkForDevelopers()
     for _, plr in pairs(Players:GetPlayers()) do
-        if plr == player then continue end -- Skip self
+        if plr == player then continue end
         
         local plrGui = plr:FindFirstChild("PlayerGui")
         if plrGui then
@@ -324,7 +325,6 @@ task.spawn(function()
                 
                 local Main = Result:FindFirstChild("Main")
                 if Main then
-                    -- Cache all needed references
                     local mapName = Main.MapLabel and Main.MapLabel.Text or "Unknown"
                     local HeaderVictory = Result:FindFirstChild("HeaderVictory")
                     local HeaderDefeated = Result:FindFirstChild("HeaderDefeated")
@@ -361,7 +361,6 @@ task.spawn(function()
                     webhookStatus:SetDesc(success and "✅ Sent: " .. os.date("%H:%M:%S") or "❌ Failed")
                 end
                 
-                -- Wait for Result to close
                 repeat 
                     task.wait(1)
                     Result = Upboard and Upboard:FindFirstChild("Result")
@@ -451,15 +450,26 @@ task.spawn(function()
     end
 end)
 
--- IMPROVED: Candy capacity and Bag detection
-local currentTestingBagId = nil
-
--- Listen for Inventory updates (detects successful purchases/bag usage)
+-- IMPROVED: Bag system with automatic scanning
 if InventoryRemote then
     InventoryRemote.OnClientEvent:Connect(function(action, itemId, quantity)
         if action == "UpdatePartially" and itemId and quantity then
-            -- Check if this is a ticket (has purchasedTicketId or matches winter ticket pattern)
-            if purchasedTicketId == itemId or (itemId >= 100 and itemId <= 200 and quantity >= 1) then
+            -- Check if this is the bag we're currently testing during scan
+            if currentScanId and itemId == currentScanId and quantity >= 1 then
+                -- Found a working bag!
+                if not table.find(activeBagIds, itemId) and #activeBagIds < 2 then
+                    table.insert(activeBagIds, itemId)
+                    bagStatus:SetDesc("✅ Found bag ID: " .. itemId .. " (Qty: " .. quantity .. ") - Total: " .. #activeBagIds .. "/2")
+                    
+                    -- If we found 2 bags, stop scanning
+                    if #activeBagIds >= 2 then
+                        scanningComplete = true
+                        bagStatus:SetDesc("✅ Scan complete! Found bags: " .. table.concat(activeBagIds, ", "))
+                    end
+                end
+                currentScanId = nil
+            -- Check if this is a ticket
+            elseif purchasedTicketId == itemId or (itemId >= 100 and itemId <= 119 and quantity >= 1) then
                 purchasedTicketId = itemId
                 currentTicketAmount = quantity
                 ticketBuyDetected = true
@@ -469,13 +479,6 @@ if InventoryRemote then
                     ticketStatus:SetDesc("✅ MAX REACHED! ID: " .. itemId .. " (Qty: " .. quantity .. "/" .. maxTickets .. ")")
                 else
                     ticketStatus:SetDesc("✅ Ticket bought! ID: " .. itemId .. " (Qty: " .. quantity .. "/" .. maxTickets .. ")")
-                end
-            -- Check if this is a bag (likely different ID range)
-            elseif itemId >= 100 and itemId <= 200 and quantity >= 1 then
-                -- This might be a bag, add it to activeBagIds if not already there
-                if not table.find(activeBagIds, itemId) and #activeBagIds < 2 then
-                    table.insert(activeBagIds, itemId)
-                    bagStatus:SetDesc("✅ Found bag ID: " .. itemId .. " (Qty: " .. quantity .. ") - Total: " .. #activeBagIds)
                 end
             end
         end
@@ -487,30 +490,16 @@ NotifyRemote.OnClientEvent:Connect(function(msgType, msgContent)
         if msgContent:find("Daily Capacity") then
             candyCapacityReached = true
             dataPara:SetDesc("⚠️ CANDY LIMIT REACHED!")
-        elseif msgContent:find("This Item is not usable") or msgContent:find("not usable") then
-            -- This bag doesn't work, continue scanning
-            if currentTestingBagId then
-                bagStatus:SetDesc("⚠️ Bag " .. currentTestingBagId .. " not usable, continuing scan...")
-                currentTestingBagId = nil
-            end
         end
     elseif msgType == "Prompt" and type(msgContent) == "table" then
-        -- Check if this is a bag opening
+        -- Auto-claim bag rewards
         if msgContent.RE or msgContent.Dice or msgContent.AbilityShard or msgContent.PMedal or msgContent.DDice then
-            if currentTestingBagId and not table.find(activeBagIds, currentTestingBagId) then
-                table.insert(activeBagIds, currentTestingBagId)
-                bagStatus:SetDesc("✅ Found working bag: " .. currentTestingBagId .. " (Total: " .. #activeBagIds .. ")")
-                
-                -- Claim the rewards
-                task.spawn(function()
-                    task.wait(0.1)
-                    pcall(function()
-                        AwardRemote:FireServer("Prompt", msgContent)
-                    end)
+            task.spawn(function()
+                task.wait(0.1)
+                pcall(function()
+                    AwardRemote:FireServer("Prompt", msgContent)
                 end)
-                
-                currentTestingBagId = nil
-            end
+            end)
         end
     end
 end)
@@ -527,14 +516,12 @@ task.spawn(function()
                 local candy = Workspace:FindFirstChild("Candy")
                 local gift = Workspace:FindFirstChild("Gift")
                 
-                -- Collect from Candy container
                 if candy then
                     for _, item in pairs(candy:GetChildren()) do
                         table.insert(items, {Obj = item, Type = "candy"})
                     end
                 end
                 
-                -- Collect from Gift container
                 if gift then
                     for _, item in pairs(gift:GetChildren()) do
                         table.insert(items, {Obj = item, Type = "gift"})
@@ -638,51 +625,92 @@ task.spawn(function()
     end
 end)
 
--- IMPROVED: Use All Bags (No Scanning Needed - Uses Inventory IDs)
--- Bags are automatically detected via Inventory UpdatePartially events
--- Just use the bags we've detected every 4 seconds
-
--- Separate loop: Use detected bags every 4 seconds
+-- IMPROVED: Automatic Bag Scanner (ID 120-150)
 task.spawn(function()
-    while task.wait(4) do
-        if Fluent.Options.UseAllBags.Value and game.PlaceId == LOBBY_PLACEID and #activeBagIds > 0 then
+    while task.wait(1) do
+        -- Only scan if toggle is on, in lobby, not already scanning, and haven't found 2 bags yet
+        if Fluent.Options.UseAllBags.Value and game.PlaceId == LOBBY_PLACEID and not bagCheckInProgress and #activeBagIds < 2 and not scanningComplete then
+            bagCheckInProgress = true
+            bagStatus:SetDesc("🔍 Starting bag scan (120-150)...")
+            
+            -- Scan IDs from 120 to 150
+            for testId = 120, 150 do
+                if not Fluent.Options.UseAllBags.Value or #activeBagIds >= 2 then
+                    break -- Stop if toggle turned off or found 2 bags
+                end
+                
+                currentScanId = testId
+                bagStatus:SetDesc("🔍 Testing ID: " .. testId .. " (" .. #activeBagIds .. "/2 found)")
+                
+                -- Fire the remote twice for this ID
+                for i = 1, 2 do
+                    pcall(function()
+                        PossessionRemote:FireServer("UseItem", testId)
+                    end)
+                    task.wait(0.1)
+                end
+                
+                -- Wait 0.5s before testing next ID
+                task.wait(0.5)
+            end
+            
+            bagCheckInProgress = false
+            
+            if #activeBagIds >= 2 then
+                scanningComplete = true
+                bagStatus:SetDesc("✅ Scan complete! Found bags: " .. table.concat(activeBagIds, ", "))
+            elseif #activeBagIds == 1 then
+                bagStatus:SetDesc("⚠️ Only found 1 bag: " .. activeBagIds[1] .. ". Retrying in 5s...")
+                task.wait(5)
+            else
+                bagStatus:SetDesc("❌ No bags found in range 120-150. Retrying in 10s...")
+                task.wait(10)
+            end
+        end
+    end
+end)
+
+-- IMPROVED: Use Detected Bags Every 2 Seconds
+task.spawn(function()
+    while task.wait(2) do
+        if Fluent.Options.UseAllBags.Value and game.PlaceId == LOBBY_PLACEID and #activeBagIds > 0 and scanningComplete then
             -- Use all detected bags
             for _, bagId in ipairs(activeBagIds) do
                 pcall(function()
                     PossessionRemote:FireServer("UseItem_Ten", bagId)
                 end)
-                task.wait(0.1) -- Small delay between bags
+                task.wait(0.1)
             end
             
             local bagList = table.concat(activeBagIds, ", ")
             bagStatus:SetDesc("✅ Using bags: " .. bagList .. " (" .. os.date("%H:%M:%S") .. ")")
         elseif Fluent.Options.UseAllBags.Value and game.PlaceId == LOBBY_PLACEID and #activeBagIds == 0 then
-            bagStatus:SetDesc("⚠️ No bag IDs detected yet. Use bags manually first!")
+            bagStatus:SetDesc("🔍 Scanning for bags...")
         elseif Fluent.Options.UseAllBags.Value and game.PlaceId ~= LOBBY_PLACEID then
             bagStatus:SetDesc("⚠️ Not in lobby")
-        else
+        elseif not Fluent.Options.UseAllBags.Value then
             bagStatus:SetDesc("Disabled")
+            -- Reset scan state when disabled
+            scanningComplete = false
+            bagCheckInProgress = false
         end
     end
 end)
 
--- NEW: Auto Buy Ticket System (Improved with Max Amount Check)
+-- Auto Buy Ticket System
 task.spawn(function()
     while task.wait(0.3) do
         local maxTickets = tonumber(Fluent.Options.MaxTicketAmount.Value) or 25
         
         if Fluent.Options.AutoBuyTicket.Value and game.PlaceId == LOBBY_PLACEID and ChristmasShopRemote and not noCurrency then
-            -- Check if we've reached max tickets
             if currentTicketAmount >= maxTickets then
                 ticketStatus:SetDesc("✅ MAX REACHED! " .. currentTicketAmount .. "/" .. maxTickets .. " tickets")
-                task.wait(2) -- Wait before checking again
+                task.wait(2)
                 continue
             end
             
-            -- Reset detection flag before each attempt
             ticketBuyDetected = false
             
-            -- Spam buy remote 3 times with small delays
             for i = 1, 3 do
                 pcall(function()
                     ChristmasShopRemote:FireServer("BuyItem", "Winter Town Ticket")
@@ -692,23 +720,19 @@ task.spawn(function()
             
             ticketStatus:SetDesc("🛒 Buying... (" .. currentTicketAmount .. "/" .. maxTickets .. ") " .. os.date("%H:%M:%S"))
             
-            -- Wait up to 2 seconds to check if Inventory update was received
             local waitStart = tick()
             while tick() - waitStart < 2 do
                 if ticketBuyDetected then
-                    -- Successfully purchased!
                     noCurrency = false
                     break
                 end
                 task.wait(0.1)
             end
             
-            -- If still no inventory update after 2 seconds, means no currency
             if not ticketBuyDetected then
                 noCurrency = true
                 ticketStatus:SetDesc("❌ No Currency!")
             else
-                -- Reset noCurrency flag on successful purchase
                 noCurrency = false
             end
             
@@ -719,7 +743,6 @@ task.spawn(function()
         elseif Fluent.Options.AutoBuyTicket.Value and noCurrency then
             ticketStatus:SetDesc("❌ No Currency! (Retrying in 5s...)")
             task.wait(5)
-            -- Reset and try again after 5 seconds
             noCurrency = false
         elseif Fluent.Options.AutoBuyTicket.Value and game.PlaceId ~= LOBBY_PLACEID then
             ticketStatus:SetDesc("⚠️ Not in lobby")
@@ -808,7 +831,6 @@ local function findRoom(item)
     end
 end
 
--- NEW: Winter Ticket Function (Uses Purchased Ticket ID)
 local function tryWinterTicket()
     if not Fluent.Options.UseWinterTicket.Value then return false end
     
@@ -819,14 +841,12 @@ local function tryWinterTicket()
     
     winterTicketStatus:SetDesc("🎫 Using purchased ticket ID: " .. purchasedTicketId)
     
-    -- Use the purchased ticket
     pcall(function()
         PossessionRemote:FireServer("UseItem", purchasedTicketId)
     end)
     
     task.wait(0.5)
     
-    -- Check for success by looking for Winter Event UI
     local checkStart = tick()
     while tick() - checkStart < 2 do
         local lobbyRel = pGui:FindFirstChild("LobbyRelatives")
@@ -845,7 +865,6 @@ local function tryWinterTicket()
                                 
                                 task.wait(1)
                                 
-                                -- Fire Play remote to join the portal
                                 local t = tick()
                                 while tick() - t < 0.5 do
                                     pcall(function()
@@ -856,10 +875,8 @@ local function tryWinterTicket()
                                 
                                 winterTicketStatus:SetDesc("✅ Joined portal! Waiting for START button...")
                                 
-                                -- Wait for the game to load and START button to appear
                                 task.wait(3)
                                 
-                                -- Look for and click START button
                                 local startClicked = false
                                 local startWaitTime = tick()
                                 while tick() - startWaitTime < 10 and not startClicked do
@@ -869,7 +886,6 @@ local function tryWinterTicket()
                                         if Wave then
                                             local StartButtonHolder = Wave:FindFirstChild("StartButtonHolder")
                                             if StartButtonHolder and StartButtonHolder.Visible then
-                                                -- Click START button via remote
                                                 pcall(function()
                                                     UpboardRemote:FireServer("Start")
                                                 end)
@@ -941,7 +957,6 @@ task.spawn(function()
                     challengeAttempts = challengeAttempts + 1
                     challengeStatus:SetDesc(string.format("Not found (Attempt %d/3)", challengeAttempts))
                     
-                    -- NEW: After 3 failed attempts, use priority system with Winter Ticket
                     if challengeAttempts >= 3 then
                         challengeAttempts = 0
                         challengeStatus:SetDesc("3 attempts failed - Trying priority modes...")
@@ -1018,7 +1033,6 @@ task.spawn(function()
                             return false
                         end
                         
-                        -- Try priorities in order
                         local priority1 = Fluent.Options.Priority1.Value
                         local priority2 = Fluent.Options.Priority2.Value
                         local priority3 = Fluent.Options.Priority3.Value
@@ -1037,11 +1051,9 @@ task.spawn(function()
                             prioritySuccess = tryMode(priority3)
                         end
                         
-                        -- If any priority succeeded, wait longer before next challenge attempt
                         if prioritySuccess then
                             challengeStatus:SetDesc("✅ Priority mode joined! Match starting...")
                             
-                            -- Wait for match to actually start (player leaves lobby)
                             local waitStart = tick()
                             while game.PlaceId == LOBBY_PLACEID and tick() - waitStart < 30 do
                                 task.wait(1)
@@ -1050,7 +1062,6 @@ task.spawn(function()
                             if game.PlaceId ~= LOBBY_PLACEID then
                                 challengeStatus:SetDesc("🎮 In match... waiting for completion")
                                 
-                                -- Wait until player returns to lobby (match finished)
                                 while game.PlaceId ~= LOBBY_PLACEID do
                                     task.wait(2)
                                 end
@@ -1061,7 +1072,7 @@ task.spawn(function()
                             end
                             
                             challengeRunning = false
-                            task.wait(5) -- Extra 5 seconds before allowing next challenge attempt
+                            task.wait(5)
                             continue
                         else
                             challengeStatus:SetDesc("❌ All priority modes failed")
@@ -1078,15 +1089,12 @@ end)
 -- UI Loop (Optimized)
 task.spawn(function()
     while task.wait(0.5) do
-        -- Update awakening status
         statusPara:SetDesc("Wave: " .. currentWaveNum .. " | Ready: " .. (aggressiveSpam and "YES" or "NO"))
         
-        -- Update collection stats
         if not candyCapacityReached then
             dataPara:SetDesc("Gifts: " .. giftCount .. " | Candy: " .. candyCount)
         end
         
-        -- Update challenge status
         local joinChallengeActive = JoinChallenge.Value
         if not joinChallengeActive then
             challengeStatus:SetDesc("Auto Join OFF")
@@ -1096,7 +1104,6 @@ task.spawn(function()
             challengeStatus:SetDesc("Not in lobby")
         end
         
-        -- Update webhook status
         local webhookEnabled = Fluent.Options.EnableWebhook.Value
         local webhookURL = Fluent.Options.WebhookURL.Value
         local hasURL = webhookURL and webhookURL ~= ""
