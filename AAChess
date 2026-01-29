@@ -226,7 +226,29 @@ task.spawn(function()
 end)
 
 -- Auto Skip & Difficulty
-task.spawn(function() while task.wait(4) do if Fluent.Options.AutoSkip.Value then local Upboard = pGui:FindFirstChild("Upboard"); if Upboard and Upboard.Wave and Upboard.Wave:FindFirstChild("SkipWaveButtonHolder") then pcall(function() UpboardRemote:FireServer("Vote") end) end end end end)
+task.spawn(function() 
+    local lastSkipAttempt = 0
+    while task.wait(1) do 
+        if Fluent.Options.AutoSkip.Value then 
+            local Upboard = pGui:FindFirstChild("Upboard")
+            if Upboard and Upboard.Wave and Upboard.Wave:FindFirstChild("SkipWaveButtonHolder") then
+                local skipButton = Upboard.Wave.SkipWaveButtonHolder
+                
+                -- Check if skip button is visible and hasn't been attempted recently
+                if skipButton.Visible and (tick() - lastSkipAttempt) > 3 then
+                    -- Wait 2 seconds after UI appears before skipping
+                    task.wait(2)
+                    
+                    -- Check again if still visible after wait
+                    if skipButton.Visible and Fluent.Options.AutoSkip.Value then
+                        pcall(function() UpboardRemote:FireServer("Vote") end)
+                        lastSkipAttempt = tick()
+                    end
+                end
+            end
+        end 
+    end 
+end)
 task.spawn(function() while task.wait(0.5) do if Fluent.Options.AutoDifficulty.Value ~= "None" then local PickCard = pGui:FindFirstChild("PickCard"); if PickCard and PickCard:FindFirstChild("ChristmasCard") and XmasRemote then pcall(function() XmasRemote:FireServer("Pick", Fluent.Options.AutoDifficulty.Value) end); task.wait(1) end end end end)
 
 -- Inventory Updates
@@ -317,19 +339,23 @@ task.spawn(function()
 end)
 
 -- Bag Scanner & User
+local bagBusy = false -- Prevent bag operations from interfering with ticket buying
+
 task.spawn(function()
     while task.wait(1) do
         if Fluent.Options.UseAllBags.Value and game.PlaceId == LOBBY_ID and not state.bagCheckInProgress and #state.activeBagIds < 2 and not state.scanningComplete then
+            bagBusy = true -- Mark as busy
             state.bagCheckInProgress = true
             bagStatus:SetDesc("🔍 Starting bag scan (120-150)...")
             for id = 120, 150 do
                 if not Fluent.Options.UseAllBags.Value or #state.activeBagIds >= 2 then break end
                 state.currentScanId = id
                 bagStatus:SetDesc("🔍 Testing ID: " .. id .. " (" .. #state.activeBagIds .. "/2 found)")
-                for i = 1, 2 do pcall(function() PossessionRemote:FireServer("UseItem", id) end); task.wait(0.1) end
-                task.wait(0.5)
+                for i = 1, 2 do pcall(function() PossessionRemote:FireServer("UseItem", id) end); task.wait(0.15) end
+                task.wait(0.6) -- Slightly longer wait to avoid interference
             end
             state.bagCheckInProgress = false
+            bagBusy = false -- Release
             if #state.activeBagIds >= 2 then state.scanningComplete = true; bagStatus:SetDesc("✅ Scan complete! Found bags: " .. table.concat(state.activeBagIds, ", "))
             elseif #state.activeBagIds == 1 then bagStatus:SetDesc("⚠️ Only found 1 bag: " .. state.activeBagIds[1] .. ". Retrying in 5s..."); task.wait(5)
             else bagStatus:SetDesc("❌ No bags found in range 120-150. Retrying in 10s..."); task.wait(10) end
@@ -338,10 +364,15 @@ task.spawn(function()
 end)
 
 task.spawn(function()
-    while task.wait(2) do
+    while task.wait(3) do -- Changed from 2 to 3 seconds to reduce conflicts
         if Fluent.Options.UseAllBags.Value and game.PlaceId == LOBBY_ID and #state.activeBagIds > 0 and state.scanningComplete then
-            for _, id in ipairs(state.activeBagIds) do pcall(function() PossessionRemote:FireServer("UseItem_Ten", id) end); task.wait(0.1) end
+            bagBusy = true -- Mark as busy
+            for _, id in ipairs(state.activeBagIds) do 
+                pcall(function() PossessionRemote:FireServer("UseItem_Ten", id) end)
+                task.wait(0.15) 
+            end
             bagStatus:SetDesc("✅ Using bags: " .. table.concat(state.activeBagIds, ", ") .. " (" .. os.date("%H:%M:%S") .. ")")
+            bagBusy = false -- Release
         elseif Fluent.Options.UseAllBags.Value and game.PlaceId == LOBBY_ID and #state.activeBagIds == 0 then bagStatus:SetDesc("🔍 Scanning for bags...")
         elseif Fluent.Options.UseAllBags.Value and game.PlaceId ~= LOBBY_ID then bagStatus:SetDesc("⚠️ Not in lobby")
         elseif not Fluent.Options.UseAllBags.Value then bagStatus:SetDesc("Disabled"); state.scanningComplete, state.bagCheckInProgress = false, false end
@@ -358,6 +389,13 @@ task.spawn(function()
             ticketStatus:SetDesc("Disabled")
             state.noCurrency, state.ticketBuyDetected, state.hasTriedBuyingOnce = false, false, false
             task.wait(1)
+            continue
+        end
+        
+        -- Wait if bag operations are running to avoid interference
+        if bagBusy then
+            ticketStatus:SetDesc("⏸️ Waiting (bag operations running)...")
+            task.wait(0.5)
             continue
         end
         
