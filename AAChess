@@ -697,14 +697,30 @@ task.spawn(function()
     end
 end)
 
--- Auto Buy Ticket System
+-- Auto Buy Ticket System (Dynamic Speed Based on Challenge Status)
 task.spawn(function()
-    while task.wait(0.3) do
+    while task.wait(0.1) do
         local maxTickets = tonumber(Fluent.Options.MaxTicketAmount.Value) or 25
         
+        -- CRITICAL: Check if we've reached max tickets FIRST
+        if Fluent.Options.AutoBuyTicket.Value and currentTicketAmount >= maxTickets then
+            ticketStatus:SetDesc("✅ MAX REACHED! " .. currentTicketAmount .. "/" .. maxTickets .. " tickets - STOPPED")
+            task.wait(2)
+            continue -- Skip the entire buying logic
+        end
+        
+        -- Determine buy speed based on challenge attempts
+        local buySpeed = 4 -- Default: slow speed (4 seconds)
+        
+        -- If we've failed 3 times and are trying priority modes, speed up to 0.5s
+        if challengeAttempts >= 3 then
+            buySpeed = 0.5
+        end
+        
         if Fluent.Options.AutoBuyTicket.Value and game.PlaceId == LOBBY_PLACEID and ChristmasShopRemote and not noCurrency then
+            -- Double check max before buying
             if currentTicketAmount >= maxTickets then
-                ticketStatus:SetDesc("✅ MAX REACHED! " .. currentTicketAmount .. "/" .. maxTickets .. " tickets")
+                ticketStatus:SetDesc("✅ MAX REACHED! " .. currentTicketAmount .. "/" .. maxTickets .. " tickets - STOPPED")
                 task.wait(2)
                 continue
             end
@@ -718,12 +734,17 @@ task.spawn(function()
                 task.wait(0.1)
             end
             
-            ticketStatus:SetDesc("🛒 Buying... (" .. currentTicketAmount .. "/" .. maxTickets .. ") " .. os.date("%H:%M:%S"))
+            local speedIndicator = buySpeed == 0.5 and " [FAST]" or " [SLOW]"
+            ticketStatus:SetDesc("🛒 Buying..." .. speedIndicator .. " (" .. currentTicketAmount .. "/" .. maxTickets .. ") " .. os.date("%H:%M:%S"))
             
             local waitStart = tick()
             while tick() - waitStart < 2 do
                 if ticketBuyDetected then
                     noCurrency = false
+                    -- Check if we just hit the max
+                    if currentTicketAmount >= maxTickets then
+                        ticketStatus:SetDesc("✅ MAX REACHED! " .. currentTicketAmount .. "/" .. maxTickets .. " tickets - STOPPED")
+                    end
                     break
                 end
                 task.wait(0.1)
@@ -731,21 +752,28 @@ task.spawn(function()
             
             if not ticketBuyDetected then
                 noCurrency = true
-                ticketStatus:SetDesc("❌ No Currency!")
+                ticketStatus:SetDesc("❌ No Currency!" .. speedIndicator)
             else
                 noCurrency = false
             end
+            
+            -- Wait based on current buy speed
+            task.wait(buySpeed)
             
         elseif not Fluent.Options.AutoBuyTicket.Value then
             ticketStatus:SetDesc("Disabled")
             noCurrency = false
             ticketBuyDetected = false
+            task.wait(1)
         elseif Fluent.Options.AutoBuyTicket.Value and noCurrency then
             ticketStatus:SetDesc("❌ No Currency! (Retrying in 5s...)")
             task.wait(5)
             noCurrency = false
         elseif Fluent.Options.AutoBuyTicket.Value and game.PlaceId ~= LOBBY_PLACEID then
             ticketStatus:SetDesc("⚠️ Not in lobby")
+            task.wait(1)
+        else
+            task.wait(1)
         end
     end
 end)
