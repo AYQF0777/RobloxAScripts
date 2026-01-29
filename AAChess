@@ -254,7 +254,11 @@ task.spawn(function() while task.wait(0.5) do if Fluent.Options.AutoDifficulty.V
 -- Inventory Updates
 if InventoryRemote then
     InventoryRemote.OnClientEvent:Connect(function(a, id, qty)
+        -- Debug: Print all inventory updates to see what we're getting
+        print("[INVENTORY DEBUG] Action:", a, "| ID:", id, "| Qty:", qty, "| Type:", type(id), type(qty))
+        
         if a == "UpdatePartially" and id and qty then
+            -- BAG DETECTION
             if state.currentScanId and id == state.currentScanId and qty >= 1 then
                 if not table.find(state.activeBagIds, id) and #state.activeBagIds < 2 then
                     table.insert(state.activeBagIds, id)
@@ -262,10 +266,27 @@ if InventoryRemote then
                     if #state.activeBagIds >= 2 then state.scanningComplete = true; bagStatus:SetDesc("✅ Scan complete! Found bags: " .. table.concat(state.activeBagIds, ", ")) end
                 end
                 state.currentScanId = nil
-            elseif state.purchasedTicketId == id or (id >= 100 and id <= 119 and qty >= 1) then
-                state.purchasedTicketId, state.currentTicketAmount, state.ticketBuyDetected = id, qty, true
+            end
+            
+            -- TICKET DETECTION (Winter Town Ticket IDs are typically 100-119)
+            -- Accept ANY item in range 100-150 as potential ticket
+            if id >= 100 and id <= 150 and qty >= 1 then
+                print("[TICKET DETECTED] ID:", id, "| Qty:", qty)
+                
+                -- Store ticket info
+                state.purchasedTicketId = id
+                state.currentTicketAmount = qty
+                state.ticketBuyDetected = true
+                
                 local max = tonumber(Fluent.Options.MaxTicketAmount.Value) or 25
-                ticketStatus:SetDesc(state.currentTicketAmount >= max and "✅ MAX REACHED! ID: " .. id .. " (Qty: " .. qty .. "/" .. max .. ")" or "✅ Ticket bought! ID: " .. id .. " (Qty: " .. qty .. "/" .. max .. ")")
+                
+                if state.currentTicketAmount >= max then
+                    ticketStatus:SetDesc("✅ MAX REACHED! ID: " .. id .. " | Qty: " .. qty .. "/" .. max)
+                    print("[TICKET] MAX REACHED!")
+                else
+                    ticketStatus:SetDesc("✅ Ticket detected! ID: " .. id .. " | Qty: " .. qty .. "/" .. max)
+                    print("[TICKET] Updated successfully")
+                end
             end
         end
     end)
@@ -382,7 +403,7 @@ end)
 -- Auto Buy Ticket
 task.spawn(function()
     while true do
-        task.wait(0.1)
+        task.wait(0.2)
         
         -- Check if toggle is enabled first
         if not Fluent.Options.AutoBuyTicket.Value then 
@@ -395,7 +416,7 @@ task.spawn(function()
         -- Wait if bag operations are running to avoid interference
         if bagBusy then
             ticketStatus:SetDesc("⏸️ Waiting (bag operations running)...")
-            task.wait(0.5)
+            task.wait(1)
             continue
         end
         
@@ -415,107 +436,114 @@ task.spawn(function()
         
         local max = tonumber(Fluent.Options.MaxTicketAmount.Value) or 25
         
-        -- Check if we've reached max (ONLY if we have ticket ID)
-        if state.purchasedTicketId and state.currentTicketAmount >= max then
+        -- CRITICAL: Only stop if BOTH ID exists AND quantity >= max
+        if state.purchasedTicketId and state.currentTicketAmount and state.currentTicketAmount >= max then
             ticketStatus:SetDesc("✅ STOPPED! ID: " .. state.purchasedTicketId .. " | Qty: " .. state.currentTicketAmount .. "/" .. max)
-            task.wait(2)
+            task.wait(3)
             continue
         end
+        
+        -- Show current status
+        local statusText = "ID: " .. (state.purchasedTicketId and tostring(state.purchasedTicketId) or "❌ None") .. 
+                          " | Qty: " .. (state.currentTicketAmount and tostring(state.currentTicketAmount) or "❌ None") .. "/" .. max
         
         -- BEFORE 3 ATTEMPTS: Buy ONCE
         if state.challengeAttempts < 3 then
             if not state.hasTriedBuyingOnce then
+                -- Mark as tried IMMEDIATELY to prevent multiple attempts
+                state.hasTriedBuyingOnce = true
+                
                 -- Attempt to buy once
-                ticketStatus:SetDesc("🛒 Buying ONCE (detecting ID)... Attempt: " .. os.date("%H:%M:%S"))
+                ticketStatus:SetDesc("🛒 BUYING ONCE... " .. statusText)
                 state.ticketBuyDetected = false
                 
-                -- Fire buy remote multiple times for reliability
-                for i = 1, 5 do 
+                -- Fire buy remote aggressively
+                for i = 1, 8 do 
                     pcall(function() 
                         ChristmasShopRemote:FireServer("BuyItem", "Winter Town Ticket") 
                     end)
-                    task.wait(0.15)
+                    task.wait(0.2)
                 end
                 
-                -- Wait for inventory response (up to 4 seconds)
+                ticketStatus:SetDesc("⏳ Waiting for inventory update... " .. statusText)
+                
+                -- Wait for inventory response (up to 5 seconds)
                 local waitStart = tick()
-                while tick() - waitStart < 4 do
-                    if state.ticketBuyDetected then
+                while tick() - waitStart < 5 do
+                    -- Check if we got BOTH ID and quantity
+                    if state.ticketBuyDetected and state.purchasedTicketId and state.currentTicketAmount then
                         state.noCurrency = false
-                        state.hasTriedBuyingOnce = true
                         
-                        if state.purchasedTicketId and state.currentTicketAmount then
-                            ticketStatus:SetDesc("✅ Detected! ID: " .. state.purchasedTicketId .. " | Qty: " .. state.currentTicketAmount .. "/" .. max)
-                            
-                            -- Check if already at max
-                            if state.currentTicketAmount >= max then 
-                                ticketStatus:SetDesc("✅ STOPPED! Already at max: " .. state.currentTicketAmount .. "/" .. max) 
-                            end
+                        ticketStatus:SetDesc("✅ SUCCESS! ID: " .. state.purchasedTicketId .. " | Qty: " .. state.currentTicketAmount .. "/" .. max)
+                        
+                        -- Check if already at max
+                        if state.currentTicketAmount >= max then 
+                            ticketStatus:SetDesc("✅ STOPPED! Already at max: " .. state.currentTicketAmount .. "/" .. max) 
                         end
                         break
                     end
-                    task.wait(0.1)
+                    task.wait(0.2)
                 end
                 
-                -- If no response, mark as no currency (but don't block - might just be slow)
-                if not state.ticketBuyDetected then
-                    ticketStatus:SetDesc("⚠️ No response from buy attempt (may retry)")
-                    -- Don't set noCurrency = true immediately, give it another chance
+                -- If no response or incomplete data - DON'T RETRY, we already bought once
+                if not state.ticketBuyDetected or not state.purchasedTicketId or not state.currentTicketAmount then
+                    ticketStatus:SetDesc("⚠️ BOUGHT ONCE but incomplete data! " .. statusText .. " (Won't retry)")
+                    -- Keep hasTriedBuyingOnce = true so we don't buy again
                 end
                 
                 task.wait(3)
             else
-                -- Already bought once, just waiting
-                ticketStatus:SetDesc("⏸️ Waiting (ID: " .. (state.purchasedTicketId or "Detecting...") .. " | Qty: " .. state.currentTicketAmount .. "/" .. max .. ")")
-                task.wait(1)
+                -- Already bought once, show current data and wait
+                ticketStatus:SetDesc("⏸️ BOUGHT ONCE | " .. statusText .. " (Waiting for 3 attempts)")
+                task.wait(2)
             end
         else
-            -- AFTER 3 ATTEMPTS: Buy every 0.4s
-            state.hasTriedBuyingOnce = false -- Reset for next cycle
+            -- AFTER 3 ATTEMPTS: Buy every 0.5s
+            -- Reset flag is now allowed since we're in fast mode
             
-            -- Final check before fast buying
-            if state.purchasedTicketId and state.currentTicketAmount >= max then 
+            -- Final check before fast buying - need BOTH ID and quantity
+            if state.purchasedTicketId and state.currentTicketAmount and state.currentTicketAmount >= max then 
                 ticketStatus:SetDesc("✅ STOPPED! ID: " .. state.purchasedTicketId .. " | Qty: " .. state.currentTicketAmount .. "/" .. max)
-                task.wait(1)
+                task.wait(2)
                 continue
             end
             
-            ticketStatus:SetDesc("🛒 FAST BUY [0.4s] (ID: " .. (state.purchasedTicketId or "?") .. " | " .. state.currentTicketAmount .. "/" .. max .. ")")
+            ticketStatus:SetDesc("🛒 FAST BUY [0.5s] | " .. statusText)
             state.ticketBuyDetected = false
             
             -- Fire buy remote
-            for i = 1, 5 do 
+            for i = 1, 6 do 
                 pcall(function() 
                     ChristmasShopRemote:FireServer("BuyItem", "Winter Town Ticket") 
                 end)
-                task.wait(0.1)
+                task.wait(0.15)
             end
             
             -- Wait for response
             local waitStart = tick()
-            while tick() - waitStart < 2 do
-                if state.ticketBuyDetected then
+            while tick() - waitStart < 3 do
+                if state.ticketBuyDetected and state.purchasedTicketId and state.currentTicketAmount then
                     state.noCurrency = false
                     
-                    if state.purchasedTicketId and state.currentTicketAmount >= max then 
+                    if state.currentTicketAmount >= max then 
                         ticketStatus:SetDesc("✅ STOPPED! ID: " .. state.purchasedTicketId .. " | Qty: " .. state.currentTicketAmount .. "/" .. max)
                         break
                     else 
-                        ticketStatus:SetDesc("✅ Bought! ID: " .. (state.purchasedTicketId or "?") .. " | " .. state.currentTicketAmount .. "/" .. max) 
+                        ticketStatus:SetDesc("✅ Bought! ID: " .. state.purchasedTicketId .. " | Qty: " .. state.currentTicketAmount .. "/" .. max) 
                     end
                     break
                 end
-                task.wait(0.1)
+                task.wait(0.2)
             end
             
             -- Check if max reached one more time
-            if state.purchasedTicketId and state.currentTicketAmount >= max then 
+            if state.purchasedTicketId and state.currentTicketAmount and state.currentTicketAmount >= max then 
                 ticketStatus:SetDesc("✅ STOPPED! ID: " .. state.purchasedTicketId .. " | Qty: " .. state.currentTicketAmount .. "/" .. max)
-                task.wait(1)
+                task.wait(2)
                 continue
             end
             
-            task.wait(0.4) -- 0.4s interval for fast mode
+            task.wait(0.5) -- 0.5s interval for fast mode
         end
     end
 end)
