@@ -841,78 +841,93 @@ local function tryWinterTicket()
     
     winterTicketStatus:SetDesc("🎫 Using purchased ticket ID: " .. purchasedTicketId)
     
+    -- Use the ticket
     pcall(function()
         PossessionRemote:FireServer("UseItem", purchasedTicketId)
     end)
     
-    task.wait(0.5)
+    task.wait(1) -- Wait for UI to appear
     
+    -- Check if Winter Event UI appeared (ticket was successfully used)
     local checkStart = tick()
-    while tick() - checkStart < 2 do
+    local uiFound = false
+    
+    while tick() - checkStart < 3 do
         local lobbyRel = pGui:FindFirstChild("LobbyRelatives")
         if lobbyRel then
             local winterUI = lobbyRel:FindFirstChild("WinterEvent")
             if winterUI then
                 local mainFrame = winterUI:FindFirstChild("MainFrame")
-                if mainFrame then
+                if mainFrame and mainFrame.Visible then
                     local contents = mainFrame:FindFirstChild("Contents")
                     if contents then
                         local buttons = contents:FindFirstChild("Buttons")
                         if buttons then
                             local createBtn = buttons:FindFirstChild("Create")
                             if createBtn and createBtn.Visible then
-                                winterTicketStatus:SetDesc("✅ Winter ticket " .. purchasedTicketId .. " activated!")
-                                
-                                task.wait(1)
-                                
-                                local t = tick()
-                                while tick() - t < 0.5 do
-                                    pcall(function()
-                                        DoorsRemote:FireServer("Play", "Custom")
-                                    end)
-                                    task.wait(0.05)
-                                end
-                                
-                                winterTicketStatus:SetDesc("✅ Joined portal! Waiting for START button...")
-                                
-                                task.wait(3)
-                                
-                                local startClicked = false
-                                local startWaitTime = tick()
-                                while tick() - startWaitTime < 10 and not startClicked do
-                                    local Upboard = pGui:FindFirstChild("Upboard")
-                                    if Upboard then
-                                        local Wave = Upboard:FindFirstChild("Wave")
-                                        if Wave then
-                                            local StartButtonHolder = Wave:FindFirstChild("StartButtonHolder")
-                                            if StartButtonHolder and StartButtonHolder.Visible then
-                                                pcall(function()
-                                                    UpboardRemote:FireServer("Start")
-                                                end)
-                                                winterTicketStatus:SetDesc("✅ START button clicked!")
-                                                startClicked = true
-                                                break
-                                            end
-                                        end
-                                    end
-                                    task.wait(0.5)
-                                end
-                                
-                                if not startClicked then
-                                    winterTicketStatus:SetDesc("⚠️ START button not found, continuing anyway")
-                                end
-                                
-                                return true
+                                uiFound = true
+                                winterTicketStatus:SetDesc("✅ Winter ticket UI opened!")
+                                break
                             end
                         end
                     end
                 end
             end
         end
+        task.wait(0.2)
+    end
+    
+    -- If UI didn't appear, ticket failed
+    if not uiFound then
+        winterTicketStatus:SetDesc("❌ Ticket UI didn't appear - ticket may be invalid")
+        return false
+    end
+    
+    -- UI is open, now join the portal
+    task.wait(0.5)
+    
+    local t = tick()
+    while tick() - t < 1 do
+        pcall(function()
+            DoorsRemote:FireServer("Play", "Custom")
+        end)
         task.wait(0.1)
     end
     
-    winterTicketStatus:SetDesc("❌ Failed to use ticket ID: " .. purchasedTicketId)
+    winterTicketStatus:SetDesc("✅ Joining Winter Event portal...")
+    
+    -- Wait for game to load and check if we left lobby
+    local waitStart = tick()
+    while tick() - waitStart < 15 do
+        -- Check if we're loading into the game (left lobby)
+        if game.PlaceId ~= LOBBY_PLACEID then
+            winterTicketStatus:SetDesc("✅ Successfully joined Winter Event match!")
+            return true
+        end
+        
+        -- Also check for START button in case we're still in lobby
+        local Upboard = pGui:FindFirstChild("Upboard")
+        if Upboard then
+            local Wave = Upboard:FindFirstChild("Wave")
+            if Wave then
+                local StartButtonHolder = Wave:FindFirstChild("StartButtonHolder")
+                if StartButtonHolder and StartButtonHolder.Visible then
+                    -- Click START button
+                    pcall(function()
+                        UpboardRemote:FireServer("Start")
+                    end)
+                    winterTicketStatus:SetDesc("✅ START button clicked! Match starting...")
+                    task.wait(5) -- Wait for match to start
+                    return true
+                end
+            end
+        end
+        
+        task.wait(0.5)
+    end
+    
+    -- If we're here, something went wrong
+    winterTicketStatus:SetDesc("⚠️ Timeout waiting for match start")
     return false
 end
 
