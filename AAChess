@@ -697,36 +697,116 @@ task.spawn(function()
     end
 end)
 
--- Auto Buy Ticket System (Dynamic Speed Based on Challenge Status)
+-- Auto Buy Ticket System (Buy ONCE before 3 attempts, then fast after)
+local lastTicketBuyTime = 0
+local hasTriedBuyingOnce = false
+
 task.spawn(function()
     while task.wait(0.1) do
         local maxTickets = tonumber(Fluent.Options.MaxTicketAmount.Value) or 25
         
-        -- CRITICAL: Check if we've reached max tickets FIRST
-        if Fluent.Options.AutoBuyTicket.Value and currentTicketAmount >= maxTickets then
-            ticketStatus:SetDesc("✅ MAX REACHED! " .. currentTicketAmount .. "/" .. maxTickets .. " tickets - STOPPED")
+        -- CRITICAL: Check if we have ID and amount >= max (stop if we know we have enough)
+        if purchasedTicketId and currentTicketAmount >= maxTickets then
+            if Fluent.Options.AutoBuyTicket.Value then
+                ticketStatus:SetDesc("✅ STOPPED! ID: " .. purchasedTicketId .. " | Qty: " .. currentTicketAmount .. "/" .. maxTickets)
+            end
             task.wait(2)
-            continue -- Skip the entire buying logic
+            continue
         end
         
-        -- Determine buy speed based on challenge attempts
-        local buySpeed = 4 -- Default: slow speed (4 seconds)
-        
-        -- If we've failed 3 times and are trying priority modes, speed up to 0.5s
-        if challengeAttempts >= 3 then
-            buySpeed = 0.5
+        if not Fluent.Options.AutoBuyTicket.Value then
+            ticketStatus:SetDesc("Disabled")
+            noCurrency = false
+            ticketBuyDetected = false
+            hasTriedBuyingOnce = false
+            task.wait(1)
+            continue
         end
         
-        if Fluent.Options.AutoBuyTicket.Value and game.PlaceId == LOBBY_PLACEID and ChristmasShopRemote and not noCurrency then
-            -- Double check max before buying
-            if currentTicketAmount >= maxTickets then
-                ticketStatus:SetDesc("✅ MAX REACHED! " .. currentTicketAmount .. "/" .. maxTickets .. " tickets - STOPPED")
-                task.wait(2)
+        if game.PlaceId ~= LOBBY_PLACEID then
+            ticketStatus:SetDesc("⚠️ Not in lobby")
+            task.wait(1)
+            continue
+        end
+        
+        if not ChristmasShopRemote then
+            ticketStatus:SetDesc("⚠️ Shop remote not found")
+            task.wait(1)
+            continue
+        end
+        
+        if noCurrency then
+            ticketStatus:SetDesc("❌ No Currency!")
+            task.wait(2)
+            continue
+        end
+        
+        -- Buying logic based on challenge attempts
+        if challengeAttempts < 3 then
+            -- BEFORE 3 ATTEMPTS: Buy ONCE only (to detect ID)
+            if not hasTriedBuyingOnce then
+                ticketStatus:SetDesc("🛒 Buying ONCE (detecting ID)...")
+                
+                ticketBuyDetected = false
+                
+                -- Fire buy remote
+                for i = 1, 3 do
+                    pcall(function()
+                        ChristmasShopRemote:FireServer("BuyItem", "Winter Town Ticket")
+                    end)
+                    task.wait(0.1)
+                end
+                
+                -- Wait for response (max 3 seconds)
+                local waitStart = tick()
+                while tick() - waitStart < 3 do
+                    if ticketBuyDetected then
+                        noCurrency = false
+                        hasTriedBuyingOnce = true
+                        
+                        -- We now have ID and amount
+                        if purchasedTicketId and currentTicketAmount then
+                            ticketStatus:SetDesc("✅ Detected! ID: " .. purchasedTicketId .. " | Qty: " .. currentTicketAmount .. "/" .. maxTickets)
+                            
+                            -- Check if we already have max
+                            if currentTicketAmount >= maxTickets then
+                                ticketStatus:SetDesc("✅ STOPPED! Already at max: " .. currentTicketAmount .. "/" .. maxTickets)
+                            end
+                        end
+                        break
+                    end
+                    task.wait(0.1)
+                end
+                
+                if not ticketBuyDetected then
+                    noCurrency = true
+                    ticketStatus:SetDesc("❌ No Currency detected!")
+                end
+                
+                lastTicketBuyTime = tick()
+                task.wait(2) -- Wait before next check
+            else
+                -- Already bought once, just wait
+                ticketStatus:SetDesc("⏸️ Waiting (ID: " .. (purchasedTicketId or "?") .. " | Qty: " .. currentTicketAmount .. "/" .. maxTickets .. ")")
+                task.wait(1)
+            end
+        else
+            -- AFTER 3 ATTEMPTS: Buy every 0.4s until max reached
+            -- Reset the once flag when we enter priority mode
+            hasTriedBuyingOnce = false
+            
+            -- Check if we already have max
+            if purchasedTicketId and currentTicketAmount >= maxTickets then
+                ticketStatus:SetDesc("✅ STOPPED! ID: " .. purchasedTicketId .. " | Qty: " .. currentTicketAmount .. "/" .. maxTickets)
+                task.wait(1)
                 continue
             end
             
+            ticketStatus:SetDesc("🛒 FAST BUY [0.4s] (ID: " .. (purchasedTicketId or "?") .. " | " .. currentTicketAmount .. "/" .. maxTickets .. ")")
+            
             ticketBuyDetected = false
             
+            -- Fire buy remote
             for i = 1, 3 do
                 pcall(function()
                     ChristmasShopRemote:FireServer("BuyItem", "Winter Town Ticket")
@@ -734,16 +814,18 @@ task.spawn(function()
                 task.wait(0.1)
             end
             
-            local speedIndicator = buySpeed == 0.5 and " [FAST]" or " [SLOW]"
-            ticketStatus:SetDesc("🛒 Buying..." .. speedIndicator .. " (" .. currentTicketAmount .. "/" .. maxTickets .. ") " .. os.date("%H:%M:%S"))
-            
+            -- Wait for response (max 2 seconds)
             local waitStart = tick()
             while tick() - waitStart < 2 do
                 if ticketBuyDetected then
                     noCurrency = false
-                    -- Check if we just hit the max
-                    if currentTicketAmount >= maxTickets then
-                        ticketStatus:SetDesc("✅ MAX REACHED! " .. currentTicketAmount .. "/" .. maxTickets .. " tickets - STOPPED")
+                    
+                    -- Check if we hit max after this purchase
+                    if purchasedTicketId and currentTicketAmount >= maxTickets then
+                        ticketStatus:SetDesc("✅ STOPPED! ID: " .. purchasedTicketId .. " | Qty: " .. currentTicketAmount .. "/" .. maxTickets)
+                        break
+                    else
+                        ticketStatus:SetDesc("✅ Bought! ID: " .. (purchasedTicketId or "?") .. " | " .. currentTicketAmount .. "/" .. maxTickets)
                     end
                     break
                 end
@@ -752,28 +834,17 @@ task.spawn(function()
             
             if not ticketBuyDetected then
                 noCurrency = true
-                ticketStatus:SetDesc("❌ No Currency!" .. speedIndicator)
-            else
-                noCurrency = false
+                ticketStatus:SetDesc("❌ No Currency!")
             end
             
-            -- Wait based on current buy speed
-            task.wait(buySpeed)
+            -- Check one more time before waiting
+            if purchasedTicketId and currentTicketAmount >= maxTickets then
+                ticketStatus:SetDesc("✅ STOPPED! ID: " .. purchasedTicketId .. " | Qty: " .. currentTicketAmount .. "/" .. maxTickets)
+                task.wait(1)
+                continue
+            end
             
-        elseif not Fluent.Options.AutoBuyTicket.Value then
-            ticketStatus:SetDesc("Disabled")
-            noCurrency = false
-            ticketBuyDetected = false
-            task.wait(1)
-        elseif Fluent.Options.AutoBuyTicket.Value and noCurrency then
-            ticketStatus:SetDesc("❌ No Currency! (Retrying in 5s...)")
-            task.wait(5)
-            noCurrency = false
-        elseif Fluent.Options.AutoBuyTicket.Value and game.PlaceId ~= LOBBY_PLACEID then
-            ticketStatus:SetDesc("⚠️ Not in lobby")
-            task.wait(1)
-        else
-            task.wait(1)
+            task.wait(0.4) -- Fast mode: 0.4 second interval
         end
     end
 end)
@@ -862,12 +933,25 @@ end
 local function tryWinterTicket()
     if not Fluent.Options.UseWinterTicket.Value then return false end
     
+    -- First, teleport to ticket purchase area
+    winterTicketStatus:SetDesc("📍 Teleporting to ticket area...")
+    local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+    if hrp then
+        hrp.CFrame = CFrame.new(-11.89, 3.10, 259.60)
+        task.wait(1) -- Wait 1 second after TP
+    end
+    
+    winterTicketStatus:SetDesc("⏳ Waiting 0.5s before using ticket...")
+    task.wait(0.5)
+    
+    -- Use the ticket ID from the ONCE purchase at script start
+    -- If no ID exists, it means the initial purchase failed
     if not purchasedTicketId then
-        winterTicketStatus:SetDesc("❌ No purchased ticket ID found! Buy ticket first.")
+        winterTicketStatus:SetDesc("❌ No ticket ID from initial purchase - Moving to Priority 2")
         return false
     end
     
-    winterTicketStatus:SetDesc("🎫 Using purchased ticket ID: " .. purchasedTicketId)
+    winterTicketStatus:SetDesc("🎫 Using ticket ID: " .. purchasedTicketId .. " (from initial purchase)")
     
     -- Use the ticket
     pcall(function()
@@ -907,7 +991,7 @@ local function tryWinterTicket()
     
     -- If UI didn't appear, ticket failed
     if not uiFound then
-        winterTicketStatus:SetDesc("❌ Ticket UI didn't appear - ticket may be invalid")
+        winterTicketStatus:SetDesc("❌ Ticket UI didn't appear - Moving to Priority 2")
         return false
     end
     
