@@ -11,6 +11,7 @@ local ServerInfo = RS:WaitForChild("Server Information")
 local Remotes = RS:WaitForChild("Remotes")
 local UpboardRemote, ChampionRemote, NotifyRemote, PossessionRemote, SettingsRemote, AwardRemote = Remotes.Upboard, Remotes:WaitForChild("Champion"), Remotes:WaitForChild("Notify"), Remotes:WaitForChild("Possession"), Remotes:WaitForChild("Settings"), Remotes:WaitForChild("Award")
 local XmasRemote = Remotes:FindFirstChild("GameModes") and Remotes.GameModes:FindFirstChild("XMasDifficulties")
+local AdminTrialRemote = Remotes:FindFirstChild("GameModes") and Remotes.GameModes:FindFirstChild("AdminTrial")
 local InventoryRemote = Remotes:FindFirstChild("Inventory")
 
 local LobbyRel = RS:FindFirstChild("Lobby Relatives")
@@ -26,16 +27,32 @@ local state = {
     challengeRunning = false, challengeAttempts = 0,
     candyCapReached = false, activeBagIds = {}, currentScanId = nil,
     scanningComplete = false, ticketBuyDetected = false, noCurrency = false,
-    purchasedTicketId = nil, currentTicketAmount = 0, hasTriedBuyingOnce = false
+    purchasedTicketId = nil, currentTicketAmount = 0, hasTriedBuyingOnce = false,
+    adminTrialActive = false, -- tracks whether we are currently inside a card-pick firing loop
+    adminTrialSuccess = false  -- set to true by NotifyRemote when "[Admin Trial]" success is received
 }
 
 -- Constants
 local LOBBY_ID, CHALLENGE_ROOMS = 16695366828, {"Hourly_01_01", "Hourly_01_02", "Hourly_02_01", "Hourly_02_02", "Hourly_03_01", "Hourly_03_02"}
 local POS = {TP = Vector3.new(78.55, 4.08, -217.50), XMAS = Vector3.new(-81.45, 3.94, -22.50), INFINITE = Vector3.new(-177.96, 30.14, 41.08), TICKET = Vector3.new(-11.89, 3.10, 259.60)}
 
+-- AdminTrial card list (these are the exact strings sent as arg[2] to the remote)
+local ADMIN_TRIAL_CARDS = {
+    "Traitless",
+    "C4Sheep",
+    "GhostTeammate_02",
+    "Inflation",
+    "Uniqueindividual",
+    "GhostTeammate_01",
+    "None",
+    "LesserTitanRumbling"
+}
+-- Dropdown values: priority slots can also be left empty
+local ADMIN_TRIAL_PRIORITY_VALUES = {"-- Empty --", "Traitless", "C4Sheep", "GhostTeammate_02", "Inflation", "Uniqueindividual", "GhostTeammate_01", "None", "LesserTitanRumbling"}
+
 -- UI
 local Window = Fluent:CreateWindow({Title = "Aden Hub (AAC)", SubTitle = "v138 - Optimized", TabWidth = 140, Size = UDim2.fromOffset(580, 460), Acrylic = false, Theme = "Dark"})
-local Tabs = {Main = Window:AddTab({Title = "Main", Icon = "play"}), Ability = Window:AddTab({Title = "Auto Ability", Icon = "zap"}), AutoJoin = Window:AddTab({Title = "Auto Join", Icon = "door-open"}), Dodge = Window:AddTab({Title = "Dodge", Icon = "move"}), Items = Window:AddTab({Title = "Items", Icon = "package"}), Webhook = Window:AddTab({Title = "Webhook", Icon = "send"}), Settings = Window:AddTab({Title = "Settings", Icon = "settings"})}
+local Tabs = {Main = Window:AddTab({Title = "Main", Icon = "play"}), Ability = Window:AddTab({Title = "Auto Ability", Icon = "zap"}), AutoJoin = Window:AddTab({Title = "Auto Join", Icon = "door-open"}), AdminTrial = Window:AddTab({Title = "AdminTrial", Icon = "shuffle"}), Dodge = Window:AddTab({Title = "Dodge", Icon = "move"}), Items = Window:AddTab({Title = "Items", Icon = "package"}), Webhook = Window:AddTab({Title = "Webhook", Icon = "send"}), Settings = Window:AddTab({Title = "Settings", Icon = "settings"})}
 
 -- Main Tab
 Tabs.Main:AddSection("Statistics")
@@ -82,6 +99,23 @@ local timeStatus = Tabs.AutoJoin:AddParagraph({Title = "Time Status", Content = 
 Tabs.AutoJoin:AddSection("Developer Detection")
 Tabs.AutoJoin:AddToggle("AutoServerHop", {Title = "Auto Server Hop if Dev Found", Default = false})
 local devStatus = Tabs.AutoJoin:AddParagraph({Title = "Dev Status", Content = "Scanning disabled"})
+
+-- AdminTrial Tab
+Tabs.AdminTrial:AddSection("Auto Select Card")
+Tabs.AdminTrial:AddToggle("AutoAdminTrial", {Title = "Auto Select Card", Default = false})
+local adminTrialStatus = Tabs.AdminTrial:AddParagraph({Title = "Status", Content = "Waiting for AdminTrialCard..."})
+
+Tabs.AdminTrial:AddSection("Card Priority (Lower = Picked First)")
+-- Create 8 priority slot dropdowns, each lets the user pick one of the cards or leave it empty
+local adminTrialPriorityDropdowns = {}
+for i = 1, #ADMIN_TRIAL_CARDS do
+    local dd = Tabs.AdminTrial:AddDropdown("AdminTrialPriority" .. i, {
+        Title = "Priority " .. i,
+        Values = ADMIN_TRIAL_PRIORITY_VALUES,
+        Default = ADMIN_TRIAL_CARDS[i] -- default order matches the original card list
+    })
+    table.insert(adminTrialPriorityDropdowns, dd)
+end
 
 -- Dodge Tab
 Tabs.Dodge:AddSection("Spin Dodge")
@@ -258,6 +292,102 @@ task.spawn(function()
 end)
 task.spawn(function() while task.wait(0.5) do if Fluent.Options.AutoDifficulty.Value ~= "None" then local PickCard = pGui:FindFirstChild("PickCard"); if PickCard and PickCard:FindFirstChild("ChristmasCard") and XmasRemote then pcall(function() XmasRemote:FireServer("Pick", Fluent.Options.AutoDifficulty.Value) end); task.wait(1) end end end end)
 
+-- AdminTrial Auto Select Card
+-- Helper: returns true if SkipWaveButtonHolder is visible right now
+local function skipWaveVisible()
+    local Upboard = pGui:FindFirstChild("Upboard")
+    if not Upboard then return false end
+    local Wave = Upboard:FindFirstChild("Wave")
+    if not Wave then return false end
+    local skipHolder = Wave:FindFirstChild("SkipWaveButtonHolder")
+    return skipHolder and skipHolder.Visible
+end
+
+task.spawn(function()
+    while task.wait(0.5) do
+        if not Fluent.Options.AutoAdminTrial.Value then
+            adminTrialStatus:SetDesc("Disabled")
+            state.adminTrialActive = false
+            continue
+        end
+
+        if state.adminTrialActive then continue end
+
+        if not AdminTrialRemote then
+            adminTrialStatus:SetDesc("⚠️ AdminTrial remote not found")
+            continue
+        end
+
+        -- Poll for PickCard.AdminTrialCard
+        local PickCard = pGui:FindFirstChild("PickCard")
+        if not PickCard or not PickCard:FindFirstChild("AdminTrialCard") then
+            adminTrialStatus:SetDesc("👁️ Waiting for AdminTrialCard...")
+            continue
+        end
+
+        -- ── AdminTrialCard detected ──
+        state.adminTrialActive = true
+        adminTrialStatus:SetDesc("✅ CardUI detected! Waiting 0.5s...")
+        task.wait(0.5)
+
+        -- Build priority queue (skip empty slots)
+        local priorityQueue = {}
+        for i = 1, #adminTrialPriorityDropdowns do
+            local val = Fluent.Options["AdminTrialPriority" .. i].Value
+            if val and val ~= "-- Empty --" then
+                table.insert(priorityQueue, val)
+            end
+        end
+        if #priorityQueue == 0 then
+            for _, card in ipairs(ADMIN_TRIAL_CARDS) do
+                table.insert(priorityQueue, card)
+            end
+        end
+
+        -- Walk priorities. Each one gets 3 seconds, firing every 1s.
+        -- Only thing that stops us and counts as success: SkipWaveButtonHolder becomes visible.
+        local succeeded = false
+        for idx, card in ipairs(priorityQueue) do
+            if not Fluent.Options.AutoAdminTrial.Value then break end
+
+            adminTrialStatus:SetDesc(string.format("🎴 [%d/%d] Firing: %s", idx, #priorityQueue, card))
+
+            -- Fire 3 times over 3 seconds (t=0, t=1, t=2), polling skip wave every 0.2s
+            for shot = 1, 3 do
+                -- Fire once at the start of each 1-second window
+                pcall(function()
+                    AdminTrialRemote:FireServer("Pick", card)
+                end)
+
+                -- Poll for up to 1 second after this shot
+                local pollStart = tick()
+                while tick() - pollStart < 1 do
+                    if skipWaveVisible() then
+                        succeeded = true
+                        adminTrialStatus:SetDesc(string.format("✅ Done! Card: %s (Priority %d)", card, idx))
+                        break
+                    end
+                    if not Fluent.Options.AutoAdminTrial.Value then break end
+                    task.wait(0.2)
+                end
+
+                if succeeded or not Fluent.Options.AutoAdminTrial.Value then break end
+            end
+
+            if succeeded or not Fluent.Options.AutoAdminTrial.Value then break end
+
+            -- 3 seconds done, no skip wave → move to next priority
+            adminTrialStatus:SetDesc(string.format("⏭️ [%d/%d] %s → next", idx, #priorityQueue, card))
+        end
+
+        if not succeeded and Fluent.Options.AutoAdminTrial.Value then
+            adminTrialStatus:SetDesc("❌ All priorities exhausted. Re-polling...")
+        end
+
+        state.adminTrialActive = false
+    end
+end)
+
 -- Inventory Updates
 if InventoryRemote then
     InventoryRemote.OnClientEvent:Connect(function(a, id, qty)
@@ -301,7 +431,11 @@ end
 
 NotifyRemote.OnClientEvent:Connect(function(t, c)
     if t == "Error" and c and c:find("Daily Capacity") then state.candyCapReached = true; dataPara:SetDesc("⚠️ CANDY LIMIT REACHED!")
-    elseif t == "Prompt" and type(c) == "table" and (c.RE or c.Dice or c.AbilityShard or c.PMedal or c.DDice) then task.spawn(function() task.wait(0.1); pcall(function() AwardRemote:FireServer("Prompt", c) end) end) end
+    elseif t == "Prompt" and type(c) == "table" and (c.RE or c.Dice or c.AbilityShard or c.PMedal or c.DDice) then task.spawn(function() task.wait(0.1); pcall(function() AwardRemote:FireServer("Prompt", c) end) end)
+    elseif t == "Success" and type(c) == "string" and c:find("%[Admin Trial%]") then
+        -- Server confirmed the card was accepted
+        state.adminTrialSuccess = true
+    end
 end)
 
 -- Auto Collect
